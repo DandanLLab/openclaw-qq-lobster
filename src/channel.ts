@@ -1,0 +1,1604 @@
+import { promises as fs } from "node:fs";
+import * as fsSync from "node:fs";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  type ChannelPlugin,
+  type ChannelAccountSnapshot,
+  type ReplyPayload,
+} from "openclaw/plugin-sdk";
+import {
+  buildChannelConfigSchema,
+  DEFAULT_ACCOUNT_ID,
+  normalizeAccountId,
+  applyAccountNameToChannelSection,
+  migrateBaseNameToDefaultAccount,
+} from "openclaw/plugin-sdk/core";
+import { OneBotClient, registerQQClient, unregisterQQClient, getQQClient } from "./client.js";
+import { QQConfigSchema, type QQConfig, getGroupConfig, isPrimaryGroup, shouldRespondToGroup, type GroupChannelConfig } from "./config.js";
+import { getQQRuntime } from "./runtime.js";
+import type { OneBotMessage } from "./types.js";
+import { HeartFCChat } from "./core/heartflow/index.js";
+import { getPersonInfoManager } from "./core/person/index.js";
+import { KnowledgeManagerFactory } from "./core/knowledge/index.js";
+import { DreamScheduler } from "./core/dream/index.js";
+import { getImageManager, initializeImageManager } from "./core/image/index.js";
+import { ExpressionLearnerManager } from "./core/expression/index.js";
+import { getEmojiManager } from "./core/emoji/index.js";
+import { analyzeEmotion, getEmojiForEmotion, getReplyStyleSuggestion } from "./emotionAnalyzer.js";
+import { PFC } from "./core/brain/index.js";
+import { MemoryRetrieval } from "./core/memory/index.js";
+import { setCurrentMessageContext } from "./messageContext.js";
+import { getMessageQueueManager } from "./messageQueue.js";
+import {
+  downloadImageToBase64,
+  processImage,
+  formatImageDescription,
+  computeImageHash,
+  checkIfEmoji,
+  detectImageFormat,
+} from "./core/image/imageManager.js";
+import {
+  callWithModelRotation,
+  getModelTaskConfig,
+  getProviders,
+} from "./core/modelCaller.js";
+import { pluginManager, type PluginContext } from "./plugins/index.js";
+
+export type ResolvedQQAccount = ChannelAccountSnapshot & {
+  config: QQConfig;
+  client?: OneBotClient;
+};
+
+const memberCache = new Map<string, { name: string, time: number }>();
+
+class QQBotContext {
+  private personManager = getPersonInfoManager();
+  private knowledgeManagerFactory = new KnowledgeManagerFactory();
+  private dreamScheduler = new DreamScheduler();
+  private imageManager = getImageManager();
+  private expressionLearnerManager = new ExpressionLearnerManager();
+  private memoryRetrieval: Map<string, MemoryRetrieval> = new Map();
+  private heartFChatting: Map<string, HeartFCChat> = new Map();
+  private pfc: Map<string, PFC> = new Map();
+  private initialized: boolean = false;
+
+  async initialize(): Promise<void> {
+    if (this.initialized) return;
+    await initializeImageManager();
+    await pluginManager.initialize({});
+    this.initialized = true;
+    console.log("[QQBotContext] 所有模块初始化完成");
+  }
+
+  getPersonManager() { return this.personManager; }
+  getKnowledgeManager() { return this.knowledgeManagerFactory; }
+  getDreamManager() { return this.dreamScheduler; }
+  getImageManager() { return this.imageManager; }
+  getExpressionLearner() { return this.expressionLearnerManager; }
+
+  getMemoryRetrieval(chatId: string): MemoryRetrieval {
+    if (!this.memoryRetrieval.has(chatId)) {
+      this.memoryRetrieval.set(chatId, new MemoryRetrieval(chatId));
+    }
+    return this.memoryRetrieval.get(chatId)!;
+  }
+
+  getHeartFChatting(chatId: string, chatStream: any, config: any): HeartFCChat {
+    if (!this.heartFChatting.has(chatId)) {
+      this.heartFChatting.set(chatId, new HeartFCChat(chatId, chatStream, config));
+    }
+    return this.heartFChatting.get(chatId)!;
+  }
+
+  getPFC(chatId: string, chatName: string = "", botName: string = "助手"): PFC {
+    if (!this.pfc.has(chatId)) {
+      const chatConfig = { thinkMode: "dynamic" as const, plannerSmooth: 3, mentionedBotReply: true };
+      const personalityConfig = { name: botName, traits: ["友好", "乐于助人"], speakingStyle: "自然亲切" };
+      this.pfc.set(chatId, new PFC(chatId, chatName, chatConfig, personalityConfig, botName));
+    }
+    return this.pfc.get(chatId)!;
+  }
+
+  async planReply(
+    chatId: string,
+    messages: Array<{ content: string; senderId: string; senderName: string; timestamp: number; isMentioned?: boolean }>,
+    forceReply: boolean = false,
+    llmCall?: (prompt: string) => Promise<string>
+  ): Promise<{ shouldReply: boolean; reasoning?: string; actionMessage?: string }> {
+    const pfc = this.getPFC(chatId);
+    const messageInfos = messages.map((m, i) => ({
+      id: `msg_${i}_${m.timestamp}`,
+      content: m.content,
+      senderId: m.senderId,
+      senderName: m.senderName,
+      timestamp: m.timestamp,
+      isMentioned: m.isMentioned,
+      chatId,
+      chatType: "group" as const,
+    }));
+    
+    try {
+      const result = await pfc.plan(messageInfos, forceReply, llmCall);
+      if (result && result.actionType) {
+        return {
+          shouldReply: result.actionType === "reply" || result.actionType === "direct_reply",
+          reasoning: result.reasoning,
+          actionMessage: typeof result.actionMessage === 'string' ? result.actionMessage : undefined,
+        };
+      }
+    } catch (e) {
+      console.warn("[QQBotContext] PFC规划失败:", e);
+    }
+    return { shouldReply: forceReply };
+  }
+
+  processMessage(text: string, userId: number, groupId?: number): { 
+    emotion: ReturnType<typeof analyzeEmotion>;
+    personContext: string;
+    knowledgeContext: string;
+  } {
+    const emotion = analyzeEmotion(text);
+    const personContext = this.personManager.getPersonContext(userId, groupId);
+    const knowledgeResult = this.getKnowledgeManager();
+    
+    return {
+      emotion,
+      personContext,
+      knowledgeContext: "",
+    };
+  }
+
+  recordInteraction(userId: number, userName: string, groupId?: number, groupName?: string): void {
+    this.personManager.recordInteraction(userId, groupId, userName);
+    if (groupId && groupName) {
+      const person = this.personManager.getPersonInfo(userId, groupId);
+      if (person && !person.groupName) {
+        this.personManager.updatePersonInfo({ userId, groupId, groupName });
+      }
+    }
+  }
+
+  learnExpression(pattern: string, replacement: string, context?: string): void {
+    console.log(`[QQBotContext] learnExpression 被调用，但新版本使用自动学习`);
+  }
+
+  applyExpressions(text: string, context?: string): string {
+    return text;
+  }
+
+  getStats(): {
+    persons: number;
+    knowledge: number;
+    expressions: number;
+    dreams: number;
+  } {
+    return {
+      persons: this.personManager.getStats().totalPersons,
+      knowledge: 0,
+      expressions: 0,
+      dreams: 0,
+    };
+  }
+}
+
+const botContext = new QQBotContext();
+
+function getCachedMemberName(groupId: string, userId: string): string | null {
+    const key = `${groupId}:${userId}`;
+    const cached = memberCache.get(key);
+    if (cached && Date.now() - cached.time < 3600000) { // 1 hour cache
+        return cached.name;
+    }
+    return null;
+}
+
+function setCachedMemberName(groupId: string, userId: string, name: string) {
+    memberCache.set(`${groupId}:${userId}`, { name, time: Date.now() });
+}
+
+function extractImageUrls(message: OneBotMessage | string | undefined, maxImages = 3): string[] {
+  const urls: string[] = [];
+  
+  if (Array.isArray(message)) {
+    for (const segment of message) {
+      if (segment.type === "image") {
+        const url = segment.data?.url || (typeof segment.data?.file === 'string' && (segment.data.file.startsWith('http') || segment.data.file.startsWith('base64://')) ? segment.data.file : undefined);
+        if (url) {
+          urls.push(url);
+          if (urls.length >= maxImages) break;
+        }
+      }
+    }
+  } else if (typeof message === "string") {
+    const imageRegex = /\[CQ:image,[^\]]*(?:url|file)=([^,\]]+)[^\]]*\]/g;
+    let match;
+    while ((match = imageRegex.exec(message)) !== null) {
+      const val = match[1].replace(/&amp;/g, "&");
+      if (val.startsWith("http") || val.startsWith("base64://")) {
+        urls.push(val);
+        if (urls.length >= maxImages) break;
+      }
+    }
+  }
+  
+  return urls;
+}
+
+function cleanCQCodes(text: string | undefined): string {
+  if (!text) return "";
+  
+  let result = text;
+  const imageUrls: string[] = [];
+  
+  // Match both url= and file= if they look like URLs
+  const imageRegex = /\[CQ:image,[^\]]*(?:url|file)=([^,\]]+)[^\]]*\]/g;
+  let match;
+  while ((match = imageRegex.exec(text)) !== null) {
+    const val = match[1].replace(/&amp;/g, "&");
+    if (val.startsWith("http")) {
+      imageUrls.push(val);
+    }
+  }
+
+  result = result.replace(/\[CQ:face,id=(\d+)\]/g, "[表情]");
+  
+  result = result.replace(/\[CQ:[^\]]+\]/g, (match) => {
+    if (match.startsWith("[CQ:image")) {
+      return "[图片]";
+    }
+    return "";
+  });
+  
+  result = result.replace(/\s+/g, " ").trim();
+  
+  if (imageUrls.length > 0) {
+    result = result ? `${result} [图片: ${imageUrls.join(", ")}]` : `[图片: ${imageUrls.join(", ")}]`;
+  }
+  
+  return result;
+}
+
+function getReplyMessageId(message: OneBotMessage | string | undefined, rawMessage?: string): string | null {
+  if (message && typeof message !== "string") {
+    for (const segment of message) {
+      if (segment.type === "reply" && segment.data?.id) {
+        const id = String(segment.data.id).trim();
+        if (id && /^-?\d+$/.test(id)) {
+          return id;
+        }
+      }
+    }
+  }
+  if (rawMessage) {
+    const match = rawMessage.match(/\[CQ:reply,id=(\d+)\]/);
+    if (match) return match[1];
+  }
+  return null;
+}
+
+function normalizeTarget(raw: string): string {
+  return raw.replace(/^(qq:)/i, "");
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+interface CommandContext {
+  userId: number;
+  groupId?: number;
+  isGroup: boolean;
+  isAdmin: boolean;
+  client: OneBotClient;
+  config: QQConfig;
+  groupConfig: GroupChannelConfig | null;
+  cfg: any;
+}
+
+async function handleCommand(text: string, ctx: CommandContext): Promise<boolean> {
+  const { userId, groupId, isGroup, isAdmin, client, config, groupConfig, cfg } = ctx;
+  
+  if (isGroup) {
+    if (config.allowedGroups && config.allowedGroups.length > 0) {
+      if (!config.allowedGroups.includes(groupId!)) {
+        return true;
+      }
+    }
+    if (!isAdmin) {
+      return true;
+    }
+  }
+  
+  const chatFreqMatch = text.match(/^\/chat\s+(?:t|talk_frequency|talkfrequency)\s+([+-]?\d*\.?\d+)$/i);
+  if (chatFreqMatch) {
+    const value = parseFloat(chatFreqMatch[1]);
+    const clampedValue = Math.max(0, Math.min(1, value));
+    
+    if (groupConfig) {
+      groupConfig.talkValue = clampedValue;
+    }
+    
+    if (isGroup) {
+      client.sendGroupMsg(groupId!, `[CQ:at,qq=${userId}] 已设置发言频率为: ${clampedValue.toFixed(2)}`);
+    } else {
+      client.sendPrivateMsg(userId, `已设置发言频率为: ${clampedValue.toFixed(2)}`);
+    }
+    return true;
+  }
+  
+  if (/^\/chat\s+(?:s|show|status)$/i.test(text)) {
+    const talkValue = groupConfig?.talkValue ?? config.talkValue ?? 0.5;
+    const requireMention = groupConfig?.requireMention ?? config.requireMention;
+    const historyLimit = groupConfig?.historyLimit ?? config.historyLimit ?? 5;
+    const isPrimary = groupConfig?.isPrimary ?? false;
+    
+    const statusMsg = `📊 当前聊天状态
+• 发言频率: ${talkValue.toFixed(2)}
+• 需要@: ${requireMention ? "是" : "否"}
+• 历史消息数: ${historyLimit}
+• 主群: ${isPrimary ? "是" : "否"}
+• 管理员: ${isAdmin ? "是" : "否"}`;
+    
+    if (isGroup) {
+      client.sendGroupMsg(groupId!, `[CQ:at,qq=${userId}] ${statusMsg}`);
+    } else {
+      client.sendPrivateMsg(userId, statusMsg);
+    }
+    return true;
+  }
+  
+  if (/^\/emoji\s+list/i.test(text)) {
+    try {
+      const emojiManager = getEmojiManager(cfg);
+      const count = await emojiManager.getCount();
+      if (isGroup) {
+        client.sendGroupMsg(groupId!, `[CQ:at,qq=${userId}] 📊 表情包统计: 共 ${count} 个表情包`);
+      } else {
+        client.sendPrivateMsg(userId, `📊 表情包统计: 共 ${count} 个表情包`);
+      }
+    } catch (e) {
+      if (isGroup) {
+        client.sendGroupMsg(groupId!, `[CQ:at,qq=${userId}] 获取表情包统计失败`);
+      } else {
+        client.sendPrivateMsg(userId, `获取表情包统计失败`);
+      }
+    }
+    return true;
+  }
+  
+  if (/^\/random_emojis?$/i.test(text)) {
+    try {
+      const emojiManager = getEmojiManager(cfg);
+      const emojis = await emojiManager.getRandom(3);
+      if (emojis && emojis.length > 0) {
+        for (const emoji of emojis) {
+          if (emoji.path && fsSync.existsSync(emoji.path)) {
+            const buffer = fsSync.readFileSync(emoji.path);
+            const base64 = buffer.toString("base64");
+            if (isGroup) {
+              client.sendEmojiToGroup(groupId!, base64);
+            } else {
+              client.sendEmojiToPrivate(userId, base64);
+            }
+            await sleep(500);
+          }
+        }
+      } else {
+        if (isGroup) {
+          client.sendGroupMsg(groupId!, `暂无表情包～`);
+        } else {
+          client.sendPrivateMsg(userId, `暂无表情包～`);
+        }
+      }
+    } catch (e) {
+      if (isGroup) {
+        client.sendGroupMsg(groupId!, `发送表情包失败`);
+      } else {
+        client.sendPrivateMsg(userId, `发送表情包失败`);
+      }
+    }
+    return true;
+  }
+  
+  if (/^\/help$/i.test(text)) {
+    if (isGroup) {
+      return true;
+    }
+    const helpMsg = `📖 命令帮助
+/chat t <数值> - 设置发言频率 (0-1)
+/chat s - 显示当前状态
+/emoji list - 表情包统计
+/random_emoji - 随机表情包
+/search <关键词> - 网络搜索
+/summary [today|user <id>] - 聊天摘要
+/diary [list|today|generate] - 日记功能
+/memory [list|add|search|clear|stats|share] - 记忆管理
+/smart_seg [on|off|status] - 智能分段开关
+/help - 显示帮助`;
+    client.sendPrivateMsg(userId, helpMsg);
+    return true;
+  }
+  
+  const pluginCtx: PluginContext = {
+    userId,
+    groupId,
+    isGroup,
+    text,
+    senderName: '',
+    config,
+    client,
+    cfg
+  };
+  
+  if (text.startsWith('/search') || text.startsWith('/搜索') || 
+      text.startsWith('搜索 ') || text.startsWith('搜一下 ') ||
+      text.toLowerCase().startsWith('bing ')) {
+    const result = await pluginManager.getWebSearch().handle(pluginCtx);
+    if (result.handled && result.response) {
+      if (isGroup) {
+        client.sendGroupMsg(groupId!, `[CQ:at,qq=${userId}] ${result.response}`);
+      } else {
+        client.sendPrivateMsg(userId, result.response);
+      }
+      return true;
+    }
+  }
+  
+  if (text.startsWith('/summary') || text.includes('/摘要')) {
+    const result = await pluginManager.getChatSummary().handle(pluginCtx);
+    if (result.handled && result.response) {
+      if (isGroup) {
+        client.sendGroupMsg(groupId!, `[CQ:at,qq=${userId}] ${result.response}`);
+      } else {
+        client.sendPrivateMsg(userId, result.response);
+      }
+      return true;
+    }
+  }
+  
+  if (text.startsWith('/diary') || text.includes('/日记')) {
+    const result = await pluginManager.getDiaryManager().handle(pluginCtx);
+    if (result.handled && result.response) {
+      if (isGroup) {
+        client.sendGroupMsg(groupId!, `[CQ:at,qq=${userId}] ${result.response}`);
+      } else {
+        client.sendPrivateMsg(userId, result.response);
+      }
+      return true;
+    }
+  }
+  
+  if (text.startsWith('/memory') || text.includes('/记忆')) {
+    const result = await pluginManager.getMemoryManager().handle(pluginCtx);
+    if (result.handled && result.response) {
+      if (isGroup) {
+        client.sendGroupMsg(groupId!, `[CQ:at,qq=${userId}] ${result.response}`);
+      } else {
+        client.sendPrivateMsg(userId, result.response);
+      }
+      return true;
+    }
+  }
+  
+  if (text.match(/\/smart_seg/i)) {
+    const result = await pluginManager.getSmartSegmentation().handle(pluginCtx);
+    if (result.handled && result.response) {
+      if (isGroup) {
+        client.sendGroupMsg(groupId!, `[CQ:at,qq=${userId}] ${result.response}`);
+      } else {
+        client.sendPrivateMsg(userId, result.response);
+      }
+      return true;
+    }
+  }
+  
+  if (text.includes('戳') && text.includes('我')) {
+    const result = await pluginManager.getPokeEnhancer().handle(pluginCtx);
+    if (result.handled && result.response) {
+      if (isGroup) {
+        client.sendGroupMsg(groupId!, `[CQ:at,qq=${userId}] ${result.response}`);
+      } else {
+        client.sendPrivateMsg(userId, result.response);
+      }
+      return true;
+    }
+  }
+  
+  return false;
+}
+
+function isImageFile(url: string): boolean {
+    const lower = url.toLowerCase();
+    return lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.png') || lower.endsWith('.gif') || lower.endsWith('.webp');
+}
+
+function splitMessage(text: string, limit: number): string[] {
+    if (text.length <= limit) return [text];
+    const chunks = [];
+    let current = text;
+    while (current.length > 0) {
+        chunks.push(current.slice(0, limit));
+        current = current.slice(limit);
+    }
+    return chunks;
+}
+
+function stripMarkdown(text: string): string {
+    return text
+        .replace(/\*\*(.*?)\*\*/g, "$1") // Bold
+        .replace(/\*(.*?)\*/g, "$1")     // Italic
+        .replace(/`(.*?)`/g, "$1")       // Inline code
+        .replace(/#+\s+(.*)/g, "$1")     // Headers
+        .replace(/\[(.*?)\]\(.*?\)/g, "$1") // Links
+        .replace(/^\s*>\s+(.*)/gm, "▎$1") // Blockquotes
+        .replace(/```[\s\S]*?```/g, "[代码块]") // Code blocks
+        .replace(/^\|.*\|$/gm, (match) => { // Simple table row approximation
+             return match.replace(/\|/g, " ").trim();
+        })
+        .replace(/^[\-\*]\s+/gm, "• "); // Lists
+}
+
+function processAntiRisk(text: string): string {
+    return text.replace(/(https?:\/\/)/gi, "$1 ");
+}
+
+async function resolveMediaUrl(url: string): Promise<string> {
+    if (url.startsWith("file:")) {
+        try {
+            const path = fileURLToPath(url);
+            const data = await fs.readFile(path);
+            const base64 = data.toString("base64");
+            return `base64://${base64}`;
+        } catch (e) {
+            console.warn(`[QQ] Failed to convert local file to base64: ${e}`);
+            return url; // Fallback to original
+        }
+    }
+    return url;
+}
+
+export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
+  id: "qq",
+  meta: {
+    id: "qq",
+    label: "QQ (OneBot)",
+    selectionLabel: "QQ",
+    docsPath: "extensions/qq",
+    blurb: "Connect to QQ via OneBot v11",
+  },
+  capabilities: {
+    chatTypes: ["direct", "group"],
+    media: true,
+    // @ts-ignore
+    deleteMessage: true,
+  },
+  configSchema: buildChannelConfigSchema(QQConfigSchema),
+  config: {
+    listAccountIds: (cfg) => {
+        // @ts-ignore
+        const qq = cfg.channels?.qq;
+        if (!qq) return [];
+        if (qq.accounts) return Object.keys(qq.accounts);
+        return [DEFAULT_ACCOUNT_ID];
+    },
+    resolveAccount: (cfg, accountId) => {
+        const id = accountId ?? DEFAULT_ACCOUNT_ID;
+        // @ts-ignore
+        const qq = cfg.channels?.qq;
+        const accountConfig = id === DEFAULT_ACCOUNT_ID ? qq : qq?.accounts?.[id];
+        return {
+            accountId: id,
+            name: accountConfig?.name ?? "QQ Default",
+            enabled: true,
+            configured: Boolean(accountConfig?.wsUrl),
+            tokenSource: accountConfig?.accessToken ? "config" : "none",
+            config: accountConfig || {},
+        };
+    },
+    defaultAccountId: () => DEFAULT_ACCOUNT_ID,
+    describeAccount: (acc) => ({
+        accountId: acc.accountId,
+        configured: acc.configured,
+    }),
+  },
+  directory: {
+      listPeers: async ({ accountId }) => {
+          const client = getQQClient(accountId || DEFAULT_ACCOUNT_ID);
+          if (!client) return [];
+          try {
+              const friends = await client.getFriendList();
+              return friends.map(f => ({
+                  id: String(f.user_id),
+                  name: f.remark || f.nickname,
+                  kind: "user" as const,
+                  metadata: { ...f }
+              }));
+          } catch (e) {
+              return [];
+          }
+      },
+      listGroups: async ({ accountId, cfg }) => {
+          const client = getQQClient(accountId || DEFAULT_ACCOUNT_ID);
+          if (!client) return [];
+          const list: any[] = [];
+          
+          try {
+              const groups = await client.getGroupList();
+              list.push(...groups.map(g => ({
+                  id: String(g.group_id),
+                  name: g.group_name,
+                  kind: "group" as const,
+                  metadata: { ...g }
+              })));
+          } catch (e) {}
+
+          // @ts-ignore
+          const enableGuilds = cfg?.channels?.qq?.enableGuilds ?? true;
+          if (enableGuilds) {
+              try {
+                  const guilds = await client.getGuildList();
+                  list.push(...guilds.map(g => ({
+                      id: `guild:${g.guild_id}`,
+                      name: `[频道] ${g.guild_name}`,
+                      kind: "group" as const,
+                      metadata: { ...g }
+                  })));
+              } catch (e) {}
+          }
+          return list;
+      }
+  },
+  status: {
+      probeAccount: async ({ account, timeoutMs }) => {
+          if (!account.config.wsUrl) return { ok: false, error: "Missing wsUrl" };
+          
+          const client = new OneBotClient({
+              wsUrl: account.config.wsUrl,
+              accessToken: account.config.accessToken,
+          });
+          
+          return new Promise((resolve) => {
+              const timer = setTimeout(() => {
+                  client.disconnect();
+                  resolve({ ok: false, error: "Connection timeout" });
+              }, timeoutMs || 5000);
+
+              client.on("connect", async () => {
+                  try {
+                      const info = await client.getLoginInfo();
+                      clearTimeout(timer);
+                      client.disconnect();
+                      resolve({ 
+                          ok: true, 
+                          bot: { id: String(info.user_id), username: info.nickname } 
+                      });
+                  } catch (e) {
+                      clearTimeout(timer);
+                      client.disconnect();
+                      resolve({ ok: false, error: String(e) });
+                  }
+              });
+              
+              client.on("error", (err) => {
+                  clearTimeout(timer);
+                  resolve({ ok: false, error: String(err) });
+              });
+
+              client.connect();
+          });
+      },
+      buildAccountSnapshot: ({ account, runtime, probe }) => {
+          return {
+              accountId: account.accountId,
+              name: account.name,
+              enabled: account.enabled,
+              configured: account.configured,
+              running: runtime?.running ?? false,
+              lastStartAt: runtime?.lastStartAt ?? null,
+              lastError: runtime?.lastError ?? null,
+              probe,
+          };
+      }
+  },
+  setup: {
+    resolveAccountId: ({ accountId }) => normalizeAccountId(accountId),
+    applyAccountName: ({ cfg, accountId, name }) => 
+        applyAccountNameToChannelSection({ cfg, channelKey: "qq", accountId, name }),
+    validateInput: ({ input }) => null,
+    applyAccountConfig: ({ cfg, accountId, input }) => {
+        const namedConfig = applyAccountNameToChannelSection({
+            cfg,
+            channelKey: "qq",
+            accountId,
+            name: input.name,
+        });
+        
+        const next = accountId !== DEFAULT_ACCOUNT_ID 
+            ? migrateBaseNameToDefaultAccount({ cfg: namedConfig, channelKey: "qq" }) 
+            : namedConfig;
+
+        const newConfig = {
+            wsUrl: (input as any).wsUrl || (input as any).url || "ws://localhost:3001",
+            accessToken: (input as any).accessToken,
+            enabled: true,
+        };
+
+        if (accountId === DEFAULT_ACCOUNT_ID) {
+            return {
+                ...next,
+                channels: {
+                    ...next.channels,
+                    qq: { ...next.channels?.qq, ...newConfig }
+                }
+            };
+        }
+        
+        return {
+            ...next,
+            channels: {
+                ...next.channels,
+                qq: {
+                    ...next.channels?.qq,
+                    enabled: true,
+                    accounts: {
+                        ...next.channels?.qq?.accounts,
+                        [accountId]: {
+                            ...next.channels?.qq?.accounts?.[accountId],
+                            ...newConfig
+                        }
+                    }
+                }
+            }
+        };
+    }
+  },
+  gateway: {
+    startAccount: async (ctx) => {
+        const { account, cfg } = ctx;
+        const config = account.config;
+
+        if (!config.wsUrl) throw new Error("QQ: wsUrl is required");
+
+        const existingClient = getQQClient(account.accountId);
+        if (existingClient) {
+            console.log(`[QQ] Stopping existing client for account ${account.accountId} before restart`);
+            existingClient.disconnect();
+        }
+
+        const client = new OneBotClient({
+            wsUrl: config.wsUrl,
+            accessToken: config.accessToken,
+        });
+        
+        registerQQClient(account.accountId, client);
+
+        const processedMsgIds = new Set<string>();
+        const cleanupInterval = setInterval(() => {
+            if (processedMsgIds.size > 1000) processedMsgIds.clear();
+        }, 3600000);
+
+        client.on("connect", async () => {
+             console.log(`[QQ] Connected account ${account.accountId}`);
+             try {
+                const info = await client.getLoginInfo();
+                if (info && info.user_id) {
+                    client.setSelfId(info.user_id);
+                    console.log(`[QQ] Login info obtained: selfId=${info.user_id}`);
+                }
+                if (info && info.nickname) console.log(`[QQ] Logged in as: ${info.nickname} (${info.user_id})`);
+                getQQRuntime().channel.activity.record({
+                    channel: "qq", accountId: account.accountId, direction: "inbound", 
+                 });
+                await botContext.initialize();
+             } catch (err) {
+                console.warn(`[QQ] getLoginInfo failed, will rely on meta_event for selfId: ${err}`);
+             }
+        });
+
+        client.on("request", (event) => {
+            if (config.autoApproveRequests) {
+                if (event.request_type === "friend") client.setFriendAddRequest(event.flag, true);
+                else if (event.request_type === "group") client.setGroupAddRequest(event.flag, event.sub_type, true);
+            }
+        });
+
+        client.on("message", async (event) => {
+          try {
+            if (event.post_type === "meta_event") {
+                 if (event.meta_event_type === "lifecycle" && event.sub_type === "connect" && event.self_id) {
+                     client.setSelfId(event.self_id);
+                     console.log(`[QQ] Meta event set selfId=${event.self_id}`);
+                 }
+                 return;
+            }
+
+            if (event.post_type === "notice" && event.notice_type === "notify" && event.sub_type === "poke") {
+                const currentSelfId = client.getSelfId() || event.self_id;
+                if (String(event.target_id) === String(currentSelfId)) {
+                    event.post_type = "message";
+                    event.message_type = event.group_id ? "group" : "private";
+                    event.raw_message = `[动作] 用户戳了你一下`;
+                    event.message = [{ type: "text", data: { text: event.raw_message } }];
+                    console.log(`[QQ] 收到戳一戳事件，交给龙虾核心处理`);
+                } else return;
+            }
+
+            if (event.post_type !== "message") return;
+            
+            const rawText = event.raw_message || "";
+            if (/^group:\d+$/i.test(rawText.trim()) || /^terminated$/i.test(rawText.trim())) {
+                console.log(`[QQ] 拦截系统消息: ${rawText}`);
+                return;
+            }
+            
+            const selfId = client.getSelfId() || event.self_id;
+            console.log(`[QQ] 收到消息: post_type=${event.post_type}, message_type=${event.message_type}, selfId=${selfId}, user_id=${event.user_id}, group_id=${event.group_id || 'N/A'}`);
+            
+            if (selfId && String(event.user_id) === String(selfId)) {
+                console.log(`[QQ] 跳过自己的消息`);
+                return;
+            }
+
+            if (config.enableDeduplication !== false && event.message_id) {
+                const msgIdKey = String(event.message_id);
+                if (processedMsgIds.has(msgIdKey)) return;
+                processedMsgIds.add(msgIdKey);
+            }
+
+            const isGroup = event.message_type === "group";
+            const isGuild = event.message_type === "guild";
+            
+            if (isGuild && !config.enableGuilds) return;
+
+            const runtime = getQQRuntime();
+
+            const userId = event.user_id;
+            const groupId = event.group_id;
+            const guildId = event.guild_id;
+            const channelId = event.channel_id;
+            
+            let text = event.raw_message || "";
+            
+            if (Array.isArray(event.message)) {
+                let resolvedText = "";
+                for (const seg of event.message) {
+                    if (seg.type === "text") resolvedText += seg.data?.text || "";
+                    else if (seg.type === "at") {
+                        let name = seg.data?.qq;
+                        if (name !== "all" && isGroup) {
+                            const cached = getCachedMemberName(String(groupId), String(name));
+                            if (cached) name = cached;
+                            else {
+                                try {
+                                    const info = await (client as any).sendWithResponse("get_group_member_info", { group_id: groupId, user_id: name });
+                                    name = info?.card || info?.nickname || name;
+                                    setCachedMemberName(String(groupId), String(seg.data.qq), name);
+                                } catch (e) {}
+                            }
+                        }
+                        resolvedText += ` @${name} `;
+                    } else if (seg.type === "record") resolvedText += ` [语音消息]${seg.data?.text ? `(${seg.data.text})` : ""}`;
+                    else if (seg.type === "image") {
+                        const imgUrl = seg.data?.url || seg.data?.file;
+                        const subType = seg.data?.subType;
+                        
+                        if (imgUrl && (imgUrl.startsWith("http") || imgUrl.startsWith("base64://"))) {
+                            try {
+                                const base64 = await downloadImageToBase64(imgUrl);
+                                if (base64) {
+                                    let imageDescription = "";
+                                    let imageResult = null;
+                                    if (config.enableImageRecognition !== false) {
+                                        imageResult = await processImage(base64, runtime, subType, config.imageRecognitionPrompt);
+                                        imageDescription = formatImageDescription(imageResult);
+                                        resolvedText += ` ${imageDescription}`;
+                                    } else {
+                                        resolvedText += " [图片]";
+                                    }
+                                    
+                                    if ((config as any).stealEmoji !== false && isGroup && config.enableImageRecognition !== false) {
+                                        const skipVLM = (config as any).emojiCheckVLM !== true;
+                                        const isEmoji = await checkIfEmoji(base64, runtime, skipVLM, imageResult || undefined);
+                                        if (isEmoji) {
+                                            try {
+                                                const emojiDir = path.join(process.cwd(), "data", "emoji");
+                                                if (!fsSync.existsSync(emojiDir)) {
+                                                   fsSync.mkdirSync(emojiDir, { recursive: true });
+                                                }
+                                                const hash = computeImageHash(base64);
+                                                const detectedFormat = detectImageFormat(base64);
+                                                const ext = detectedFormat === "gif" ? "gif" : 
+                                                           detectedFormat === "apng" ? "png" : 
+                                                           detectedFormat === "webp" ? "webp" : 
+                                                           detectedFormat === "png" ? "png" : "jpg";
+                                                const filename = `stolen_${Date.now()}_${hash.substring(0, 8)}.${ext}`;
+                                                const filePath = path.join(emojiDir, filename);
+                                                
+                                                const buffer = Buffer.from(base64, "base64");
+                                                fsSync.writeFileSync(filePath, buffer);
+                                                const formatDisplay = detectedFormat === "apng" ? "APNG (动态PNG)" : detectedFormat.toUpperCase();
+                                                console.log(`[QQ] 🎭 自动保存表情包: ${filename} (格式: ${formatDisplay})`);
+                                            } catch (e) {
+                                                console.warn("[QQ] 保存表情包失败:", e);
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    resolvedText += " [图片]";
+                                }
+                            } catch (e) {
+                                console.warn("[QQ] 图片处理失败:", e);
+                                resolvedText += " [图片]";
+                            }
+                        } else {
+                            resolvedText += " [图片]";
+                        }
+                    } else if (seg.type === "video") resolvedText += " [视频消息]";
+                    else if (seg.type === "json") resolvedText += " [卡片消息]";
+                    else if (seg.type === "forward" && seg.data?.id) {
+                        try {
+                            const forwardData = await client.getForwardMsg(seg.data.id);
+                            if (forwardData?.messages) {
+                                resolvedText += "\n[转发聊天记录]:";
+                                for (const m of forwardData.messages.slice(0, 10)) {
+                                    resolvedText += `\n${m.sender?.nickname || m.user_id}: ${cleanCQCodes(m.content || m.raw_message)}`;
+                                }
+                            }
+                        } catch (e) {}
+                    } else if (seg.type === "file") {
+                         if (!seg.data?.url && isGroup) {
+                             try {
+                                 const info = await (client as any).sendWithResponse("get_group_file_url", { group_id: groupId, file_id: seg.data?.file_id, busid: seg.data?.busid });
+                                 if (info?.url) seg.data.url = info.url;
+                             } catch(e) {}
+                         }
+                         resolvedText += ` [文件: ${seg.data?.file || "未命名"}]`;
+                    }
+                }
+                if (resolvedText) text = resolvedText;
+            }
+            
+            if (config.blockedUsers?.includes(userId)) return;
+            if (isGroup && config.allowedGroups?.length && !config.allowedGroups.includes(groupId)) return;
+            
+            if (isGroup && !shouldRespondToGroup(config, groupId)) {
+                console.log(`[QQ] 群 ${groupId} 已禁用或不在白名单中，跳过`);
+                return;
+            }
+            
+            console.log(`[QQ] 📥 收到消息内容: "${text.substring(0, 100)}${text.length > 100 ? '...' : ''}"`);
+            
+            const groupConfig = isGroup ? getGroupConfig(config, groupId) : null;
+            const isPrimary = isGroup && isPrimaryGroup(config, groupId);
+            if (isGroup && isPrimary) {
+                console.log(`[QQ] 🌟 主群消息: ${groupId}`);
+            }
+            
+            const effectiveTalkValue = groupConfig?.talkValue ?? config.talkValue ?? 0.5;
+            const effectiveRequireMention = groupConfig?.requireMention ?? config.requireMention;
+            const effectiveHistoryLimit = groupConfig?.historyLimit ?? config.historyLimit ?? 5;
+            const effectiveKeywordTriggers = groupConfig?.keywordTriggers ?? config.keywordTriggers;
+            const effectiveSystemPrompt = groupConfig?.systemPrompt ?? config.systemPrompt;
+            
+            const isAdmin = config.admins?.includes(userId) ?? false;
+            
+            if (text.startsWith("/")) {
+                const commandResult = await handleCommand(text, {
+                    userId,
+                    groupId,
+                    isGroup,
+                    isAdmin,
+                    client,
+                    config,
+                    groupConfig,
+                    cfg,
+                });
+                if (commandResult) return;
+            }
+
+            const senderName = event.sender?.nickname || String(userId);
+            botContext.recordInteraction(userId, senderName, groupId);
+
+            const processedContext = botContext.processMessage(text, userId, groupId);
+            const emotionInfo = processedContext.emotion;
+            const personContext = processedContext.personContext;
+            const knowledgeContext = processedContext.knowledgeContext;
+
+            const chatId = isGroup ? `group:${groupId}` : `user:${userId}`;
+            pluginManager.getChatSummary().recordMessage(chatId, String(userId), senderName, text);
+            pluginManager.getDiaryManager().recordActivity(chatId, String(userId), senderName, text, emotionInfo?.emotion);
+            
+            const emotionForMemory = emotionInfo?.emotion !== 'neutral' ? emotionInfo?.emotion : undefined;
+            if (emotionForMemory && emotionInfo?.intensity && emotionInfo.intensity > 0.5) {
+              pluginManager.getMemoryManager().storeMemory(
+                chatId,
+                `[${senderName}] ${text}`,
+                emotionInfo.intensity,
+                emotionInfo.keywords || [],
+                'chat'
+              );
+            }
+            
+            if ((config as any).autoSendEmoji === true && isGroup && emotionInfo && emotionInfo.emotion !== 'neutral') {
+              const minIntensity = (config as any).autoSendEmojiMinIntensity ?? 0.5;
+              const probability = (config as any).autoSendEmojiProbability ?? 0.3;
+              
+              if (emotionInfo.intensity >= minIntensity && Math.random() < probability) {
+                try {
+                  const emojiManager = getEmojiManager(cfg);
+                  const emotionMap: Record<string, string> = {
+                    happy: '开心 高兴 快乐',
+                    sad: '难过 伤心 悲伤',
+                    angry: '生气 愤怒 火大',
+                    surprised: '惊讶 震惊 意外',
+                    confused: '困惑 迷茫 不懂',
+                    worried: '担心 焦虑 紧张',
+                    love: '爱 喜欢 心动',
+                    tired: '累 困 疲惫',
+                    excited: '兴奋 激动 期待',
+                  };
+                  const emotionText = emotionMap[emotionInfo.emotion] || emotionInfo.emotion;
+                  const emojiResult = await emojiManager.getEmojiForText(emotionText);
+                  
+                  if (emojiResult && emojiResult.path) {
+                    const imageBuffer = fsSync.readFileSync(emojiResult.path);
+                    const base64 = imageBuffer.toString("base64");
+                    client.sendEmojiToGroup(groupId!, base64);
+                    console.log(`[QQ] 🎭 根据情绪[${emotionInfo.emotion}]自动发表情包: ${emojiResult.description}`);
+                  }
+                } catch (e) {
+                  console.warn("[QQ] 自动发表情包失败:", e);
+                }
+              }
+            }
+            
+            if (config.enableUrlSummary !== false && /https?:\/\/[^\s]+/i.test(text)) {
+              const urlPluginCtx: PluginContext = {
+                userId,
+                groupId,
+                isGroup,
+                text,
+                senderName,
+                config,
+                client,
+                cfg
+              };
+              const urlResult = await pluginManager.getUrlSummary().handle(urlPluginCtx);
+              if (urlResult.handled && urlResult.response) {
+                if (isGroup) {
+                  client.sendGroupMsg(groupId!, urlResult.response);
+                } else {
+                  client.sendPrivateMsg(userId, urlResult.response);
+                }
+              }
+            }
+
+            if (!isGuild && isAdmin && text.trim().startsWith('/')) {
+                const parts = text.trim().split(/\s+/);
+                const cmd = parts[0];
+                if (cmd === '/status') {
+                    const stats = botContext.getStats();
+                    const statusMsg = `[OpenClaw QQ]\n状态: 已连接\n机器人ID: ${client.getSelfId()}\n内存: ${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2)} MB\n用户档案: ${stats.persons}\n知识条目: ${stats.knowledge}\n表达学习: ${stats.expressions}\n梦境记录: ${stats.dreams}`;
+                    if (isGroup) client.sendGroupMsg(groupId, statusMsg); else client.sendPrivateMsg(userId, statusMsg);
+                    return;
+                }
+                if (cmd === '/help') {
+                    const helpMsg = `[OpenClaw QQ]\n/status - 状态\n/mute @用户 [分] - 禁言\n/kick @用户 - 踢出\n/learn <模式> <替换> - 学习表达\n/help - 帮助`;
+                    if (isGroup) client.sendGroupMsg(groupId, helpMsg); else client.sendPrivateMsg(userId, helpMsg);
+                    return;
+                }
+                if (isGroup && (cmd === '/mute' || cmd === '/ban')) {
+                    const targetMatch = text.match(/\[CQ:at,qq=(\d+)\]/);
+                    const targetId = targetMatch ? parseInt(targetMatch[1]) : (parts[1] ? parseInt(parts[1]) : null);
+                    if (targetId) {
+                        client.setGroupBan(groupId, targetId, parts[2] ? parseInt(parts[2]) * 60 : 1800);
+                        client.sendGroupMsg(groupId, `已禁言。`);
+                    }
+                    return;
+                }
+                if (isGroup && cmd === '/kick') {
+                    const targetMatch = text.match(/\[CQ:at,qq=(\d+)\]/);
+                    const targetId = targetMatch ? parseInt(targetMatch[1]) : (parts[1] ? parseInt(parts[1]) : null);
+                    if (targetId) {
+                        client.setGroupKick(groupId, targetId);
+                        client.sendGroupMsg(groupId, `已踢出。`);
+                    }
+                    return;
+                }
+                if (cmd === '/learn' && parts.length >= 3) {
+                    const pattern = parts[1];
+                    const replacement = parts.slice(2).join(" ");
+                    botContext.learnExpression(pattern, replacement, isGroup ? `group:${groupId}` : `private:${userId}`);
+                    const learnMsg = `已学习表达: "${pattern}" -> "${replacement}"`;
+                    if (isGroup) client.sendGroupMsg(groupId, learnMsg); else client.sendPrivateMsg(userId, learnMsg);
+                    return;
+                }
+            }
+            
+            let repliedMsg: any = null;
+            const replyMsgId = getReplyMessageId(event.message, text);
+            if (replyMsgId) {
+                try { repliedMsg = await client.getMsg(replyMsgId); } catch (err) {}
+            }
+            
+            let historyContext = "";
+            if (isGroup && effectiveHistoryLimit !== 0) {
+                 try {
+                     const history = await client.getGroupMsgHistory(groupId);
+                     if (history?.messages) {
+                         const limit = effectiveHistoryLimit || 5;
+                         historyContext = history.messages.slice(-(limit + 1), -1).map((m: any) => `${m.sender?.nickname || m.user_id}: ${cleanCQCodes(m.raw_message || "")}`).join("\n");
+                     }
+                 } catch (e) {}
+            }
+
+            let isTriggered = !isGroup || text.includes("[动作] 用户戳了你一下");
+            if (!isTriggered && effectiveKeywordTriggers) {
+                for (const kw of effectiveKeywordTriggers) { if (text.includes(kw)) { isTriggered = true; break; } }
+            }
+            
+            const emojiRequestPatterns = [
+                "发表情", "发个表情", "发个表情包", "来个表情", "来个表情包",
+                "发表情包", "发张表情", "发张表情包", "来张表情", "来张表情包",
+                "扔个表情", "扔个表情包", "丢个表情", "丢个表情包",
+                "斗图", "来斗图", "表情包攻击", "表情攻击",
+                "发个图", "来个图", "发张图", "来张图",
+            ];
+            let isEmojiRequest = false;
+            for (const pattern of emojiRequestPatterns) {
+                if (text.includes(pattern)) {
+                    isEmojiRequest = true;
+                    break;
+                }
+            }
+            
+            if (isEmojiRequest && isGroup) {
+                try {
+                    const emojiManager = getEmojiManager(cfg);
+                    const emojiResult = await emojiManager.getEmojiForText(text);
+                    if (emojiResult && emojiResult.path) {
+                        const imageBuffer = fsSync.readFileSync(emojiResult.path);
+                        const base64 = imageBuffer.toString("base64");
+                        client.sendEmojiToGroup(groupId, base64);
+                        console.log(`[QQ] 响应表情包请求: ${emojiResult.description}`);
+                        return;
+                    } else {
+                        console.log(`[QQ] 没有找到合适的表情包`);
+                        return;
+                    }
+                } catch (e) {
+                    console.warn("[QQ] 表情包请求处理失败:", e);
+                }
+            }
+            
+            const checkMention = isGroup || isGuild;
+            let mentioned = false;
+            
+            const effectiveSelfId = client.getSelfId() || event.self_id;
+            console.log(`[QQ] 检查@提及: effectiveSelfId=${effectiveSelfId}, requireMention=${effectiveRequireMention}`);
+            
+            if (checkMention && Array.isArray(event.message)) {
+                for (const s of event.message) {
+                    if (s.type === "at") {
+                        const atQq = String(s.data?.qq);
+                        console.log(`[QQ] 发现@提及: at.qq=${atQq}, selfId=${effectiveSelfId}`);
+                        if (atQq === String(effectiveSelfId) || atQq === "all") {
+                            mentioned = true;
+                            console.log(`[QQ] 检测到@机器人或@全体成员`);
+                            break;
+                        }
+                    }
+                }
+            } else if (checkMention && text.includes(`[CQ:at,qq=`)) {
+                const atMatch = text.match(/\[CQ:at,qq=(\d+)\]/);
+                if (atMatch) {
+                    const atQq = atMatch[1];
+                    console.log(`[QQ] CQ码@提及: at.qq=${atQq}, selfId=${effectiveSelfId}`);
+                    if (atQq === String(effectiveSelfId)) {
+                        mentioned = true;
+                        console.log(`[QQ] 检测到CQ码@机器人`);
+                    }
+                }
+            }
+            
+            if (!mentioned && repliedMsg?.sender?.user_id === effectiveSelfId) {
+                mentioned = true;
+                console.log(`[QQ] 检测到回复机器人的消息`);
+            }
+            
+            if (effectiveRequireMention && !mentioned && !isTriggered) {
+                console.log(`[QQ] 需要提及但未检测到@，跳过消息`);
+                return;
+            }
+
+            let fromId = String(userId);
+            let conversationLabel = `QQ User ${userId}`;
+            if (isGroup) {
+                fromId = `group:${groupId}`;
+                conversationLabel = `QQ Group ${groupId}`;
+            } else if (isGuild) {
+                fromId = `guild:${guildId}:${channelId}`;
+                conversationLabel = `QQ Guild ${guildId} Channel ${channelId}`;
+            }
+
+            const messageQueueManager = getMessageQueueManager();
+            
+            const dynamicTalkValue = messageQueueManager.getDynamicTalkValue(fromId, userId, effectiveTalkValue);
+
+            if (isGroup && !mentioned && !isTriggered) {
+                if (Math.random() > dynamicTalkValue) {
+                    console.log(`[QQ] 群聊未@且概率未命中 (talkValue: ${dynamicTalkValue})，跳过`);
+                    return;
+                }
+                console.log(`[QQ] 自动触发回复 (talkValue: ${dynamicTalkValue})`);
+            }
+            
+            console.log(`[QQ] 准备生成回复: mentioned=${mentioned}, isTriggered=${isTriggered}`);
+
+            const queueResult = messageQueueManager.enqueue(fromId, {
+                chatId: fromId,
+                userId,
+                groupId: isGroup ? groupId : undefined,
+                senderName: event.sender?.nickname || String(userId),
+                text,
+                timestamp: event.time * 1000,
+                isMentioned: mentioned,
+                event
+            });
+
+            if (queueResult.cancelledMessages.length > 0) {
+                console.log(`[QQ] 🔄 @消息优先处理，取消 ${queueResult.cancelledMessages.length} 条队列消息`);
+            }
+
+            if (!queueResult.shouldProcess) {
+                console.log(`[QQ] 消息已加入队列，等待处理`);
+                return;
+            }
+
+            const queueContext = queueResult.contextMessages.length > 0 
+                ? queueResult.contextMessages.map(m => `[${m.senderName}(${m.userId})]: ${m.text}`).join('\n')
+                : '';
+
+            const abortController = messageQueueManager.startProcessing(fromId);
+
+            setCurrentMessageContext({
+                userId,
+                groupId: isGroup ? groupId : undefined,
+                senderName: event.sender?.nickname || String(userId),
+                isGroup,
+                isPrimary: isGroup ? isPrimaryGroup(config, groupId!) : false,
+                accountId: account.accountId,
+                timestamp: event.time * 1000,
+            });
+
+            let pfcReasoning: string | undefined;
+            let pfcActionMessage: string | undefined;
+            try {
+                const pfcLlmCall = async (prompt: string): Promise<string> => {
+                    const runtime = getQQRuntime();
+                    const cfg = runtime.config.loadConfig() as any;
+                    const providers = getProviders(cfg);
+                    const plannerTaskConfig = getModelTaskConfig(cfg, "planner");
+                    
+                    if (!plannerTaskConfig || !plannerTaskConfig.models?.length) {
+                        console.warn("[QQ] PFC未配置planner模型任务");
+                        return "";
+                    }
+                    
+                    const result = await callWithModelRotation(providers, plannerTaskConfig, {
+                        messages: [{ role: "user", content: prompt }],
+                        maxTokens: 512,
+                        temperature: 0.3,
+                        timeout: 30000
+                    });
+                    
+                    if (!result.success) {
+                        console.warn(`[QQ] PFC所有模型调用失败: ${result.error}`);
+                        return "";
+                    }
+                    
+                    console.log(`[QQ] PFC使用模型: ${result.provider}/${result.model}`);
+                    return result.content || "";
+                };
+                
+                const pfcResult = await botContext.planReply(
+                    fromId,
+                    [{
+                        content: text,
+                        senderId: String(userId),
+                        senderName: event.sender?.nickname || String(userId),
+                        timestamp: event.time * 1000,
+                        isMentioned: mentioned,
+                    }],
+                    mentioned || isTriggered,
+                    pfcLlmCall
+                );
+                pfcReasoning = pfcResult.reasoning;
+                pfcActionMessage = pfcResult.actionMessage;
+                console.log(`[QQ] PFC决策: shouldReply=${pfcResult.shouldReply}, reasoning=${pfcReasoning?.substring(0, 50)}...`);
+            } catch (e) {
+                console.warn("[QQ] PFC决策失败:", e);
+            }
+
+            const deliver = async (payload: ReplyPayload) => {
+                 console.log(`[QQ] 🦞 龙虾核心已生成回复，准备发送到QQ: ${payload.text?.substring(0, 100)}...`);
+                 
+                 const send = async (msg: string) => {
+                     let processed = msg;
+                     if (config.formatMarkdown) processed = stripMarkdown(processed);
+                     if (config.antiRiskMode) processed = processAntiRisk(processed);
+                     
+                     const segmentation = pluginManager.getSmartSegmentation();
+                     
+                     console.log(`[QQ] 📊 开始分段处理, 原始长度: ${processed.length}`);
+                     
+                     let segments: string[] = [];
+                     if (config.enableSmartSegmentationLLM) {
+                       try {
+                         const llmCall = async (prompt: string): Promise<string> => {
+                           const providers = getProviders(cfg);
+                           const taskConfig = getModelTaskConfig(cfg, "utils");
+                           if (taskConfig && taskConfig.models?.length) {
+                             const result = await callWithModelRotation(providers, taskConfig, {
+                               messages: [{ role: "user", content: prompt }],
+                               maxTokens: 512,
+                               temperature: 0.3,
+                               timeout: 15000
+                             });
+                             return result.success ? (result.content || "") : "";
+                           }
+                           return "";
+                         };
+                         segments = await segmentation.segmentWithLLM(processed, llmCall);
+                       } catch (e) {
+                         console.warn("[QQ] 智能分段LLM调用失败:", e);
+                         segments = segmentation.segment(processed);
+                       }
+                     } else {
+                       segments = segmentation.segment(processed);
+                     }
+                     
+                     if (segments.length === 0) {
+                       console.log(`[QQ] ⏭️ 分段结果为空，跳过发送`);
+                       return;
+                     }
+                     
+                     console.log(`[QQ] 🔪 分段完成，共 ${segments.length} 段`);
+                     
+                     for (let segIdx = 0; segIdx < segments.length; segIdx++) {
+                       const segment = segments[segIdx];
+                       const chunks = splitMessage(segment, config.maxMessageLength || 4000);
+                       
+                       for (let i = 0; i < chunks.length; i++) {
+                         let chunk = chunks[i];
+                         if (isGroup && segIdx === 0 && i === 0) chunk = `[CQ:at,qq=${userId}] ${chunk}`;
+                         
+                         console.log(`[QQ] 📤 发送消息到QQ: ${isGroup ? `群${groupId}` : `用户${userId}`}, 内容: ${chunk.substring(0, 50)}...`);
+                         
+                         if (isGroup) client.sendGroupMsg(groupId, chunk);
+                         else if (isGuild) client.sendGuildChannelMsg(guildId, channelId, chunk);
+                         else client.sendPrivateMsg(userId, chunk);
+                         
+                         console.log(`[QQ] ✅ 消息已发送到QQ ${isGroup ? '群聊' : '私聊'}`);
+                         
+                         if (!isGuild && config.enableTTS && i === 0 && chunk.length < 100) {
+                             const tts = chunk.replace(/\[CQ:.*?\]/g, "").trim();
+                             if (tts) { 
+                                 if (isGroup) client.sendGroupMsg(groupId, `[CQ:tts,text=${tts}]`); 
+                                 else client.sendPrivateMsg(userId, `[CQ:tts,text=${tts}]`); 
+                             }
+                         }
+                         
+                         if (chunks.length > 1 && config.rateLimitMs > 0) await sleep(config.rateLimitMs);
+                       }
+                       
+                       if (segments.length > 1 && config.rateLimitMs > 0) {
+                         await sleep(config.rateLimitMs);
+                       }
+                     }
+                 };
+                 if (payload.text) await send(payload.text);
+                   if ((payload as any).files) {
+                     for (const f of (payload as any).files || []) { 
+                         if (f.url) { 
+                             const url = await resolveMediaUrl(f.url);
+                             if (isImageFile(url)) {
+                                 if (isGroup) client.sendImageUrlToGroup(groupId, url);
+                                 else if (isGuild) client.sendGuildChannelMsg(guildId, channelId, `[CQ:image,file=${url}]`);
+                                 else client.sendImageUrlToPrivate(userId, url);
+                             } else {
+                                 const txtMsg = `[CQ:file,file=${url},name=${f.name || 'file'}]`;
+                                 if (isGroup) client.sendGroupMsg(groupId, txtMsg);
+                                 else if (isGuild) client.sendGuildChannelMsg(guildId, channelId, `[文件] ${url}`);
+                                 else client.sendPrivateMsg(userId, txtMsg);
+                             }
+                             if (config.rateLimitMs > 0) await sleep(config.rateLimitMs);
+                         } 
+                     }
+                 }
+            };
+
+            const { dispatcher, replyOptions } = runtime.channel.reply.createReplyDispatcherWithTyping({ deliver });
+
+            let replyToBody = "";
+            let replyToSender = "";
+            if (replyMsgId && repliedMsg) {
+                replyToBody = cleanCQCodes(typeof repliedMsg.message === 'string' ? repliedMsg.message : repliedMsg.raw_message || '');
+                replyToSender = repliedMsg.sender?.nickname || repliedMsg.sender?.card || String(repliedMsg.sender?.user_id || '');
+            }
+
+            const replySuffix = replyToBody ? `\n\n[Replying to ${replyToSender || "unknown"}]\n${replyToBody}\n[/Replying]` : "";
+            let bodyWithReply = cleanCQCodes(text) + replySuffix;
+            let systemBlock = "";
+            
+            const senderInfo = `<sender>\nQQ号: ${userId}\n昵称: ${event.sender?.nickname || "Unknown"}\n${isGroup ? `群号: ${groupId}\n群名片: ${event.sender?.card || "无"}\n` : ''}是否@: ${mentioned ? '是' : '否'}\n</sender>\n\n`;
+            systemBlock += senderInfo;
+            
+            if (isGroup) {
+                const groupInfo = `<chat_info>\n类型: 群聊\n群号: ${groupId}\n${groupConfig?.name ? `群名: ${groupConfig.name}\n` : ''}是否主群: ${isPrimary ? '是' : '否'}\n</chat_info>\n\n`;
+                systemBlock += groupInfo;
+            }
+            
+            if (queueContext) {
+                systemBlock += `<queue_context>\n${queueContext}\n</queue_context>\n\n`;
+            }
+            
+            if (effectiveSystemPrompt) systemBlock += `<system>${effectiveSystemPrompt}</system>\n\n`;
+            if (isPrimary) systemBlock += `<primary_group>这是主群消息，请优先认真回复。</primary_group>\n\n`;
+            if (historyContext) systemBlock += `<history>\n${historyContext}\n</history>\n\n`;
+            if (personContext) systemBlock += `<person>\n${personContext}\n</person>\n\n`;
+            if (knowledgeContext) systemBlock += `<knowledge>\n${knowledgeContext}\n</knowledge>\n\n`;
+            if (emotionInfo && emotionInfo.emotion !== "neutral" && emotionInfo.intensity > 0.3) {
+                systemBlock += `<emotion>\n用户情感: ${emotionInfo.emotion} (强度: ${(emotionInfo.intensity * 100).toFixed(0)}%)\n关键词: ${emotionInfo.keywords.join(", ")}\n`;
+                const emotionEmoji = getEmojiForEmotion(emotionInfo.emotion);
+                if (emotionEmoji) systemBlock += `情感表情: ${emotionEmoji}\n`;
+                const replyStyle = getReplyStyleSuggestion(emotionInfo);
+                if (replyStyle) systemBlock += `建议回复风格: ${replyStyle}\n`;
+                systemBlock += `</emotion>\n\n`;
+            }
+            if (pfcReasoning) {
+                systemBlock += `<pfc_decision>\n决策推理: ${pfcReasoning}\n`;
+                if (pfcActionMessage) systemBlock += `建议回复方向: ${pfcActionMessage}\n`;
+                systemBlock += `</pfc_decision>\n\n`;
+            }
+            bodyWithReply = systemBlock + bodyWithReply;
+
+            const ctxPayload = runtime.channel.reply.finalizeInboundContext({
+                Provider: "qq", Channel: "qq", From: fromId, To: "qq:bot", Body: bodyWithReply, RawBody: text,
+                SenderId: String(userId), SenderName: event.sender?.nickname || "Unknown", ConversationLabel: conversationLabel,
+                SessionKey: `qq:${fromId}`, AccountId: account.accountId, ChatType: isGroup ? "group" : isGuild ? "channel" : "direct", Timestamp: event.time * 1000,
+                OriginatingChannel: "qq", OriginatingTo: fromId, CommandAuthorized: true,
+                ...(extractImageUrls(event.message).length > 0 && { MediaUrls: extractImageUrls(event.message) }),
+                ...(replyMsgId && { ReplyToId: replyMsgId, ReplyToBody: replyToBody, ReplyToSender: replyToSender }),
+            });
+            
+            console.log(`[QQ] 会话上下文: SessionKey=${ctxPayload.SessionKey}, From=${fromId}, ChatType=${ctxPayload.ChatType}`);
+            
+            await runtime.channel.session.recordInboundSession({
+                storePath: runtime.channel.session.resolveStorePath(cfg.session?.store, { agentId: "default" }),
+                sessionKey: ctxPayload.SessionKey!, ctx: ctxPayload,
+                updateLastRoute: { sessionKey: ctxPayload.SessionKey!, channel: "qq", to: fromId, accountId: account.accountId },
+                onRecordError: (err) => console.error("QQ Session Error:", err)
+            });
+            
+            console.log(`[QQ] ✅ 会话已记录到存储，网页端应可实时查看: SessionKey=${ctxPayload.SessionKey}`);
+
+            console.log(`[QQ] 开始生成回复, useCustomModelCaller=${config.useCustomModelCaller}`);
+            console.log(`[QQ] 🦞 消息已发送到龙虾核心，等待AI生成回复...`);
+
+            try {
+                const useCustomReply = config.useCustomModelCaller === true;
+                
+                if (useCustomReply) {
+                    const replyerTaskConfig = getModelTaskConfig(cfg, "replyer");
+                    const providers = getProviders(cfg);
+                    
+                    if (replyerTaskConfig && replyerTaskConfig.models?.length) {
+                        console.log(`[QQ] 使用自定义模型轮播生成回复，共 ${replyerTaskConfig.models.length} 个模型`);
+                        
+                        const result = await callWithModelRotation(providers, replyerTaskConfig, {
+                            messages: [{ role: "user", content: bodyWithReply }],
+                            maxTokens: replyerTaskConfig.maxTokens || 1024,
+                            temperature: replyerTaskConfig.temperature ?? 0.7,
+                        });
+                        
+                        if (result.success && result.content) {
+                            console.log(`[QQ] 🦞 龙虾核心回复生成成功: ${result.provider}/${result.model}, 内容长度=${result.content.length}`);
+                            await deliver({ text: result.content });
+                        } else {
+                            console.warn(`[QQ] 回复生成失败: ${result.error}`);
+                            if (config.enableErrorNotify) {
+                                await deliver({ text: "⚠️ 模型调用失败，请稍后重试。" });
+                            }
+                        }
+                    } else {
+                        console.warn("[QQ] 未配置replyer模型任务，回退到核心回复");
+                        console.log(`[QQ] 🦞 调用龙虾核心回复分发器...`);
+                        await runtime.channel.reply.dispatchReplyFromConfig({ ctx: ctxPayload, cfg, dispatcher, replyOptions });
+                    }
+                } else {
+                    console.log(`[QQ] 🦞 调用龙虾核心回复分发器...`);
+                    await runtime.channel.reply.dispatchReplyFromConfig({ ctx: ctxPayload, cfg, dispatcher, replyOptions });
+                }
+            } catch (error) {
+                console.error("[QQ] 回复生成错误:", error);
+                if (config.enableErrorNotify) deliver({ text: "⚠️ 服务调用失败，请稍后重试。" });
+            } finally {
+                messageQueueManager.finishProcessing(fromId, userId);
+            }
+            
+            console.log(`[QQ] 🎉 消息处理完成，网页端对话记录已更新`);
+          } catch (err) {
+            console.error("[QQ] Critical error in message handler:", err);
+          }
+        });
+
+        client.connect();
+        return () => { 
+            clearInterval(cleanupInterval);
+            client.disconnect(); 
+            unregisterQQClient(account.accountId); 
+        };
+    },
+    logoutAccount: async ({ accountId, cfg }) => {
+        return { loggedOut: true, cleared: true };
+    }
+  },
+  outbound: {
+    sendText: async ({ to, text, accountId, ...rest }) => {
+        const replyTo = (rest as any).replyTo;
+        const client = getQQClient(accountId || DEFAULT_ACCOUNT_ID);
+        if (!client) return { channel: "qq", sent: false, error: "Client not connected", messageId: undefined };
+        const chunks = splitMessage(text, 4000);
+        let lastMessageId: string | undefined;
+        for (let i = 0; i < chunks.length; i++) {
+            let message: OneBotMessage | string = chunks[i];
+            if (replyTo && i === 0) message = [ { type: "reply", data: { id: String(replyTo) } }, { type: "text", data: { text: chunks[i] } } ];
+            
+            if (to.startsWith("group:")) client.sendGroupMsg(parseInt(to.replace("group:", ""), 10), message);
+            else if (to.startsWith("guild:")) {
+                const parts = to.split(":");
+                if (parts.length >= 3) client.sendGuildChannelMsg(parts[1], parts[2], message);
+            }
+            else client.sendPrivateMsg(parseInt(to, 10), message);
+            
+            if (chunks.length > 1) await sleep(1000); 
+        }
+        return { channel: "qq", sent: true, messageId: lastMessageId };
+    },
+    sendMedia: async ({ to, text, mediaUrl, accountId, ...rest }) => {
+         const replyTo = (rest as any).replyTo;
+         const client = getQQClient(accountId || DEFAULT_ACCOUNT_ID);
+         if (!client) return { channel: "qq", sent: false, error: "Client not connected", messageId: undefined };
+         
+         const finalUrl = await resolveMediaUrl(mediaUrl);
+         
+         const message: OneBotMessage = [];
+         if (replyTo) message.push({ type: "reply", data: { id: String(replyTo) } });
+         if (text) message.push({ type: "text", data: { text } });
+         if (isImageFile(mediaUrl)) message.push({ type: "image", data: { file: finalUrl } });
+         else message.push({ type: "text", data: { text: `[CQ:file,file=${finalUrl},url=${finalUrl}]` } });
+         
+         if (to.startsWith("group:")) client.sendGroupMsg(parseInt(to.replace("group:", ""), 10), message);
+         else if (to.startsWith("guild:")) {
+             const parts = to.split(":");
+             if (parts.length >= 3) client.sendGuildChannelMsg(parts[1], parts[2], message);
+         }
+         else client.sendPrivateMsg(parseInt(to, 10), message);
+         return { channel: "qq", sent: true, messageId: undefined };
+    },
+    // @ts-ignore
+    deleteMessage: async ({ messageId, accountId }) => {
+        const client = getQQClient(accountId || DEFAULT_ACCOUNT_ID);
+        if (!client) return { channel: "qq", success: false, error: "Client not connected" };
+        try { client.deleteMsg(messageId); return { channel: "qq", success: true }; }
+        catch (err) { return { channel: "qq", success: false, error: String(err) }; }
+    }
+  },
+  messaging: { 
+      normalizeTarget,
+      targetResolver: {
+          looksLikeId: (id) => /^\d{5,12}$/.test(id) || /^guild:/.test(id),
+          hint: "QQ号, 群号 (group:123), 或频道 (guild:id:channel)",
+      }
+  }
+};
