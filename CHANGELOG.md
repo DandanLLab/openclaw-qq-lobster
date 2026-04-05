@@ -500,4 +500,5 @@ qq/
 ## 🙏 致谢
 
 - 原版项目: [Xiaji-yu/openclaw_QQ_plugin](https://github.com/Xiaji-yu/openclaw_QQ_plugin)
+- 增强版项目: [DandanLLab/openclaw-qq-lobster](https://github.com/DandanLLab/openclaw-qq-lobster)
 - OpenClaw 主项目

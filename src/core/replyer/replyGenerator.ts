@@ -513,8 +513,8 @@ ${extraInfo}`;
         success: result.success,
         content: result.content,
         reasoning: undefined,
-        model: result.usedModel,
-        provider: result.usedProvider,
+        model: result.model,
+        provider: result.provider,
       };
     } catch (error) {
       console.error("[ReplyGenerator] LLM调用失败:", error);
