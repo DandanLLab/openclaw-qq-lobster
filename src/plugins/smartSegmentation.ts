@@ -160,13 +160,14 @@ export class SmartSegmentation {
   stripThinkingContent(text: string): string {
     if (!text) return '';
     
-    let cleaned = text.replace(/<thinking>.*?<\/thinking>/gis, '');
+    let cleaned = text.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
     cleaned = cleaned.replace(/<\/?thinking>/gi, '');
-    cleaned = cleaned.replace(/<思考>.*?<\/思考>/gis, '');
+    cleaned = cleaned.replace(/<思考>[\s\S]*?<\/思考>/gi, '');
     cleaned = cleaned.replace(/<\/?思考>/gi, '');
     cleaned = cleaned.replace(/根据[A-Za-z0-9_\-\.]+[，,]?\s*/gi, '');
     cleaned = cleaned.replace(/我应该[^\n。]*[。\n]?/gi, '');
     cleaned = cleaned.replace(/回复控制在[\d\-~～]+字[。.\s]*/gi, '');
+    cleaned = cleaned.replace(/\n\s*\n\s*\n/g, '\n\n');
     return cleaned.trim();
   }
 
