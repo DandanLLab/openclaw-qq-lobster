@@ -285,12 +285,35 @@ export class SmartSegmentation {
     
     const finalSegments = segments.filter(s => s.trim());
     
-    console.log(`[SmartSegmentation] 🔪 分段完成: ${finalSegments.length} 段`);
-    finalSegments.forEach((seg, idx) => {
+    const deduplicatedSegments = this.removeDuplicateSegments(finalSegments);
+    
+    console.log(`[SmartSegmentation] 🔪 分段完成: ${deduplicatedSegments.length} 段`);
+    deduplicatedSegments.forEach((seg, idx) => {
       console.log(`[SmartSegmentation]   段${idx + 1}: ${seg.substring(0, 50)}${seg.length > 50 ? '...' : ''}`);
     });
     
-    return finalSegments.slice(0, this.maxSegments);
+    return deduplicatedSegments.slice(0, this.maxSegments);
+  }
+
+  private removeDuplicateSegments(segments: string[]): string[] {
+    if (segments.length <= 1) return segments;
+    
+    const result: string[] = [];
+    const seen = new Set<string>();
+    
+    for (const seg of segments) {
+      const normalized = seg.trim().toLowerCase();
+      if (!seen.has(normalized)) {
+        seen.add(normalized);
+        result.push(seg);
+      }
+    }
+    
+    if (result.length < segments.length) {
+      console.log(`[SmartSegmentation] 🔄 去重: ${segments.length} -> ${result.length} 段`);
+    }
+    
+    return result;
   }
 
   buildPrompt(text: string): string {
