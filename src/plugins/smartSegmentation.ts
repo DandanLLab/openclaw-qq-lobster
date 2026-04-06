@@ -381,7 +381,6 @@ export class SmartSegmentation {
     
     let processedText = this.filterDuplicateContent(text);
     processedText = this.convertEnglishPunctuation(processedText);
-    processedText = this.removeRepeatedText(processedText);
     
     console.log(`[SmartSegmentation] 🔍 过滤后文本: "${processedText.substring(0, 100)}${processedText.length > 100 ? '...' : ''}"`);
     
@@ -406,32 +405,6 @@ export class SmartSegmentation {
 
     console.log('[SmartSegmentation] 🔪 检测到分段符号，开始执行分段...');
     return this.simpleSegment(visibleText);
-  }
-
-  private removeRepeatedText(text: string): string {
-    if (!text || text.length < 5) return text;
-    
-    const halfLength = Math.floor(text.length / 2);
-    const firstHalf = text.substring(0, halfLength).trim();
-    const secondHalf = text.substring(halfLength).trim();
-    
-    if (firstHalf === secondHalf) {
-      console.log(`[SmartSegmentation] 🔄 检测到完整重复文本，去除后半部分`);
-      return firstHalf;
-    }
-    
-    const minCheckLength = 5;
-    for (let len = Math.min(halfLength, text.length - minCheckLength); len >= minCheckLength; len--) {
-      const candidate = text.substring(0, len).trim();
-      const remaining = text.substring(len).trim();
-      
-      if (remaining.startsWith(candidate)) {
-        console.log(`[SmartSegmentation] 🔄 检测到重复文本 (${len}字符)，去除重复部分`);
-        return candidate;
-      }
-    }
-    
-    return text;
   }
 
   getConfig(): SegmentationConfig {
