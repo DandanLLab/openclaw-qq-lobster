@@ -775,6 +775,18 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
         const cleanupInterval = setInterval(() => {
             if (processedMsgIds.size > 1000) processedMsgIds.clear();
         }, 3600000);
+        
+        // 生成唯一消息ID的函数
+        const generateUniqueMessageId = (event: any): string => {
+            if (event.message_id) return String(event.message_id);
+            // 为没有message_id的事件生成唯一ID
+            const timestamp = event.time || Date.now();
+            const userId = event.user_id;
+            const groupId = event.group_id || event.guild_id || 'private';
+            const type = event.post_type || 'message';
+            const subType = event.sub_type || event.notice_type || '';
+            return `${type}:${subType}:${userId}:${groupId}:${timestamp}`;
+        };
 
         client.on("connect", async () => {
              console.log(`[QQ] Connected account ${account.accountId}`);
@@ -838,10 +850,14 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                 return;
             }
 
-            if (config.enableDeduplication !== false && event.message_id) {
-                const msgIdKey = String(event.message_id);
-                if (processedMsgIds.has(msgIdKey)) return;
+            if (config.enableDeduplication !== false) {
+                const msgIdKey = generateUniqueMessageId(event);
+                if (processedMsgIds.has(msgIdKey)) {
+                    console.log(`[QQ] ⏭️ 检测到重复消息，跳过处理: ${msgIdKey}`);
+                    return;
+                }
                 processedMsgIds.add(msgIdKey);
+                console.log(`[QQ] 📝 记录消息ID: ${msgIdKey}`);
             }
 
             const isGroup = event.message_type === "group";
