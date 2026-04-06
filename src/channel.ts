@@ -1321,7 +1321,18 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                 console.warn("[QQ] PFC决策失败:", e);
             }
 
+            const sentMessages = new Set<string>();
+            let lastDeliverTime = 0;
+            const DELIVER_COOLDOWN_MS = 1000;
+
             const deliver = async (payload: ReplyPayload) => {
+                 const now = Date.now();
+                 if (now - lastDeliverTime < DELIVER_COOLDOWN_MS) {
+                     console.log(`[QQ] ⚠️ 检测到重复发送请求，跳过 (间隔: ${now - lastDeliverTime}ms)`);
+                     return;
+                 }
+                 lastDeliverTime = now;
+                 
                  console.log(`[QQ] 🦞 龙虾核心已生成回复，准备发送到QQ: ${payload.text?.substring(0, 100)}...`);
                  
                  const send = async (msg: string) => {
