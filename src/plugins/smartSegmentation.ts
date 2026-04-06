@@ -205,7 +205,8 @@ export class SmartSegmentation {
   simpleSegment(text: string): string[] {
     console.log(`[SmartSegmentation] 🔪 开始分段, 文本长度: ${text.length}`);
     
-    let processed = this.convertEnglishPunctuation(text);
+    let processed = this.stripThinkingContent(text);
+    processed = this.convertEnglishPunctuation(processed);
     
     const codeBlocks: { start: number; end: number; content: string }[] = [];
     const codeBlockRegex = /```[\s\S]*?```/g;
