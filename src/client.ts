@@ -164,15 +164,14 @@ export class OneBotClient extends EventEmitter {
     if (this.ws) {
       const ws = this.ws;
       this.ws = null;
-      ws.removeAllListeners();
       try {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.terminate();
-        } else if (ws.readyState === WebSocket.CONNECTING) {
+        ws.removeAllListeners();
+        const state = ws.readyState;
+        if (state === WebSocket.OPEN || state === WebSocket.CONNECTING) {
           ws.terminate();
         }
       } catch (err) {
-        console.warn("[QQ] WebSocket cleanup error (ignored):", err);
+        // 忽略所有 WebSocket 清理错误，重连时不抛出异常
       }
     }
   }
