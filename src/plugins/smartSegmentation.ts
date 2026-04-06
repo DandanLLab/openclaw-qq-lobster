@@ -283,27 +283,14 @@ export class SmartSegmentation {
       segments.push(this.removePeriod(current.trim()));
     }
     
-    console.log(`[SmartSegmentation] 🔪 初步分段: ${segments.length} 段`);
+    const finalSegments = segments.filter(s => s.trim());
     
-    const mergedSegments: string[] = [];
-    for (const seg of segments) {
-      if (!seg.trim()) continue;
-      if (mergedSegments.length > 0) {
-        const last = mergedSegments[mergedSegments.length - 1];
-        if (last.length + seg.length < 50 && !/^[（(]/.test(seg)) {
-          mergedSegments[mergedSegments.length - 1] = last + seg;
-          continue;
-        }
-      }
-      mergedSegments.push(seg);
-    }
-    
-    console.log(`[SmartSegmentation] 🔪 最终分段: ${mergedSegments.length} 段`);
-    mergedSegments.forEach((seg, idx) => {
+    console.log(`[SmartSegmentation] 🔪 分段完成: ${finalSegments.length} 段`);
+    finalSegments.forEach((seg, idx) => {
       console.log(`[SmartSegmentation]   段${idx + 1}: ${seg.substring(0, 50)}${seg.length > 50 ? '...' : ''}`);
     });
     
-    return mergedSegments.slice(0, this.maxSegments);
+    return finalSegments.slice(0, this.maxSegments);
   }
 
   buildPrompt(text: string): string {
@@ -370,6 +357,7 @@ export class SmartSegmentation {
     }
     
     let processedText = this.filterDuplicateContent(text);
+    processedText = this.convertEnglishPunctuation(processedText);
     
     console.log(`[SmartSegmentation] 🔍 过滤后文本: "${processedText.substring(0, 100)}${processedText.length > 100 ? '...' : ''}"`);
     
