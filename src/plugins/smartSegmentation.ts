@@ -90,6 +90,11 @@ export class SmartSegmentation {
     filtered = filtered.replace(/`https?:\/\/github\.com\/[^\s]+\.\.\.`[\s\n]*/gi, '');
     filtered = filtered.replace(/https?:\/\/github\.com\/[^\s]+\.\.\.[\s\n]*/gi, '');
     filtered = filtered.replace(/[（(][\d一二三四五六七八九十百千万]+字[）)]/gi, '');
+    filtered = filtered.replace(/回复控制在[\d\-~～]+字[。.\s]*/gi, '');
+    filtered = filtered.replace(/根据[A-Za-z0-9_\-\.]+[，,]?\s*/gi, '');
+    filtered = filtered.replace(/我应该[^\n。]*[。\n]?/gi, '');
+    filtered = filtered.replace(/这个角色形象[^\n。]*[。\n]?/gi, '');
+    filtered = filtered.replace(/师父可能[^\n。]*[。\n]?/gi, '');
     
     const seenUrls = new Set<string>();
     filtered = filtered.replace(/https?:\/\/github\.com\/[^\s]+/gi, (match) => {
