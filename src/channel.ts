@@ -1379,6 +1379,14 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                      
                      for (let segIdx = 0; segIdx < segments.length; segIdx++) {
                        const segment = segments[segIdx];
+                       
+                       const segmentKey = segment.trim().toLowerCase();
+                       if (sentMessages.has(segmentKey)) {
+                         console.log(`[QQ] ⏭️ 检测到重复分段，跳过: ${segment.substring(0, 30)}...`);
+                         continue;
+                       }
+                       sentMessages.add(segmentKey);
+                       
                        const chunks = splitMessage(segment, config.maxMessageLength || 4000);
                        
                        for (let i = 0; i < chunks.length; i++) {
