@@ -169,7 +169,7 @@ export class OneBotClient extends EventEmitter {
         if (ws.readyState === WebSocket.OPEN) {
           ws.terminate();
         } else if (ws.readyState === WebSocket.CONNECTING) {
-          ws.close();
+          ws.terminate();
         }
       } catch (err) {
         console.warn("[QQ] WebSocket cleanup error (ignored):", err);
