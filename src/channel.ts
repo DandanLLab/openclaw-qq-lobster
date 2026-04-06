@@ -1222,18 +1222,6 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
 
             const messageQueueManager = getMessageQueueManager();
             
-            const dynamicTalkValue = messageQueueManager.getDynamicTalkValue(fromId, userId, effectiveTalkValue);
-
-            if (isGroup && !mentioned && !isTriggered) {
-                if (Math.random() > dynamicTalkValue) {
-                    console.log(`[QQ] 群聊未@且概率未命中 (talkValue: ${dynamicTalkValue})，跳过`);
-                    return;
-                }
-                console.log(`[QQ] 自动触发回复 (talkValue: ${dynamicTalkValue})`);
-            }
-            
-            console.log(`[QQ] 准备生成回复: mentioned=${mentioned}, isTriggered=${isTriggered}`);
-
             const queueResult = messageQueueManager.enqueue(fromId, {
                 chatId: fromId,
                 userId,
@@ -1244,6 +1232,20 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                 isMentioned: mentioned,
                 event
             });
+
+            console.log(`[QQ] 消息已记录到队列 (上下文获取)`);
+
+            const dynamicTalkValue = messageQueueManager.getDynamicTalkValue(fromId, userId, effectiveTalkValue);
+
+            if (isGroup && !mentioned && !isTriggered) {
+                if (Math.random() > dynamicTalkValue) {
+                    console.log(`[QQ] 群聊未@且概率未命中 (talkValue: ${dynamicTalkValue.toFixed(2)})，记录上下文但不回复`);
+                    return;
+                }
+                console.log(`[QQ] 自动触发回复 (talkValue: ${dynamicTalkValue.toFixed(2)})`);
+            }
+            
+            console.log(`[QQ] 准备生成回复: mentioned=${mentioned}, isTriggered=${isTriggered}`);
 
             if (queueResult.cancelledMessages.length > 0) {
                 console.log(`[QQ] 🔄 @消息优先处理，取消 ${queueResult.cancelledMessages.length} 条队列消息`);

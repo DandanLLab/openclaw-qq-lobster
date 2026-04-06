@@ -38,7 +38,7 @@ export const QQConfigSchema = z.object({
   rateLimitMs: z.number().optional().default(1000).describe("Delay in ms between sent messages to avoid risk"),
   enableImageRecognition: z.boolean().optional().default(true).describe("Enable VLM-based image content recognition"),
   imageRecognitionPrompt: z.string().optional().default("请简洁描述这张图片的内容，如果是表情包请描述表达的情感。").describe("Custom prompt for image recognition"),
-  talkValue: z.number().optional().default(0.5).describe("Probability of auto-reply in group chats when not mentioned (0.0-1.0)"),
+  talkValue: z.number().optional().default(0.2).describe("Probability of auto-reply in group chats when not mentioned (0.0-1.0)"),
   enableModeration: z.boolean().optional().default(true).describe("Enable AI-based content moderation"),
   autoMuteMaxDuration: z.number().optional().default(60).describe("Maximum auto-mute duration in seconds (default: 60s)"),
   requireAdminApprovalForKick: z.boolean().optional().default(true).describe("Require admin approval for kick actions"),
