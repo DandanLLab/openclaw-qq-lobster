@@ -66,7 +66,7 @@ export class SmartSegmentation {
       /这些是重复发送的内容/i,
       /^Something went wrong while processing your request/i,
       /^Please try again, or use \/new to start a fresh session/i,
-      /NO_REPLY$/i,
+      /NO_REPLY/i,
       /^terminated$/i,
       /^GitHub\s*-\s*.+·\s*GitHub\s*$/i,
       /Contribute to .+ development by creating an account on GitHub/i,
@@ -80,7 +80,7 @@ export class SmartSegmentation {
     let filtered = text;
     filtered = filtered.replace(/我已经回复过[^。]*的消息了[。，]?\s*这些是重复发送的内容[。\n]*/gi, '');
     filtered = filtered.replace(/这些是重复发送的内容[。\n]*/gi, '');
-    filtered = filtered.replace(/NO_REPLY[。\n]*/gi, '');
+    filtered = filtered.replace(/[^\n]*NO_REPLY[^\n]*\n?/gi, '');
     filtered = filtered.replace(/Something went wrong while processing your request[。\n]*/gi, '');
     filtered = filtered.replace(/Please try again, or use \/new to start a fresh session[。\n]*/gi, '');
     filtered = filtered.replace(/\bterminated\b[。\n]*/gi, '');
