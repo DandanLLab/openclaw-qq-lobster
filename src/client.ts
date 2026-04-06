@@ -166,12 +166,15 @@ export class OneBotClient extends EventEmitter {
       this.ws = null;
       try {
         ws.removeAllListeners();
-        const state = ws.readyState;
-        if (state === WebSocket.OPEN || state === WebSocket.CONNECTING) {
+      } catch {
+        // 忽略移除监听器的错误
+      }
+      try {
+        if (ws.readyState === WebSocket.OPEN) {
           ws.terminate();
         }
-      } catch (err) {
-        // 忽略所有 WebSocket 清理错误，重连时不抛出异常
+      } catch {
+        // 忽略关闭错误
       }
     }
   }
