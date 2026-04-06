@@ -409,7 +409,7 @@ export class SmartSegmentation {
   }
 
   private removeRepeatedText(text: string): string {
-    if (!text || text.length < 20) return text;
+    if (!text || text.length < 10) return text;
     
     const halfLength = Math.floor(text.length / 2);
     const firstHalf = text.substring(0, halfLength).trim();
@@ -420,7 +420,7 @@ export class SmartSegmentation {
       return firstHalf;
     }
     
-    const minCheckLength = 30;
+    const minCheckLength = 10;
     for (let len = Math.min(halfLength, text.length - minCheckLength); len >= minCheckLength; len--) {
       const candidate = text.substring(0, len).trim();
       const remaining = text.substring(len).trim();
