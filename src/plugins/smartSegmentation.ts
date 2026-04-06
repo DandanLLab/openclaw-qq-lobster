@@ -89,6 +89,7 @@ export class SmartSegmentation {
     filtered = filtered.replace(/Contribute to [^\n]+development by creating an account on GitHub[\s\n]*/gi, '');
     filtered = filtered.replace(/`https?:\/\/github\.com\/[^\s]+\.\.\.`[\s\n]*/gi, '');
     filtered = filtered.replace(/https?:\/\/github\.com\/[^\s]+\.\.\.[\s\n]*/gi, '');
+    filtered = filtered.replace(/[（(][\d一二三四五六七八九十百千万]+字[）)]/gi, '');
     
     const seenUrls = new Set<string>();
     filtered = filtered.replace(/https?:\/\/github\.com\/[^\s]+/gi, (match) => {
