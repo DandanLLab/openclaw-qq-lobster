@@ -544,11 +544,37 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
   },
   status: {
       probeAccount: async ({ account, timeoutMs }) => {
-          if (!account.config.wsUrl) return { ok: false, error: "Missing wsUrl" };
+          const config = account.config;
+          
+          const connectionConfig = resolveConnectionConfig(config);
+          
+          if (connectionConfig.mode === "reverse") {
+              console.log(`[QQ] 🔍 probeAccount: 反向WebSocket模式，检查现有连接`);
+              const client = getQQClient(account.accountId || DEFAULT_ACCOUNT_ID);
+              if (client && client.isConnected()) {
+                  try {
+                      const info = await client.getLoginInfo();
+                      console.log(`[QQ] ✅ probeAccount: 连接正常, 用户=${info.nickname}`);
+                      return { 
+                          ok: true, 
+                          bot: { id: String(info.user_id), username: info.nickname } 
+                      };
+                  } catch (e) {
+                      console.warn(`[QQ] ⚠️ probeAccount: 获取登录信息失败: ${e}`);
+                      return { ok: false, error: String(e) };
+                  }
+              }
+              console.log(`[QQ] ✅ probeAccount: 反向WebSocket模式，等待NapCat连接`);
+              return { ok: true, bot: { id: "reverse-mode", username: "Reverse WS Mode" } };
+          }
+          
+          if (!connectionConfig.wsUrl) return { ok: false, error: "Missing wsUrl" };
+          
+          console.log(`[QQ] 🔍 probeAccount: 正向WebSocket模式，尝试连接 ${connectionConfig.wsUrl}`);
           
           const client = new OneBotClient({
-              wsUrl: account.config.wsUrl,
-              accessToken: account.config.accessToken,
+              wsUrl: connectionConfig.wsUrl,
+              accessToken: config.accessToken,
           });
           
           return new Promise((resolve) => {
