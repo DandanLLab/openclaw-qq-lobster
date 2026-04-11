@@ -700,15 +700,18 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
         if (existingClient) {
             if (existingClient.isConnected()) {
                 console.log(`[QQ] ✅ 账号 ${account.accountId} 已连接，跳过重启`);
-                const cleanupFn = () => {
-                    existingClient.disconnect();
-                    unregisterQQClient(account.accountId);
-                    clearMemberCache();
-                    flushRefIndex();
-                    flushKnownUsers();
-                    console.log(`[QQ] 🧹 账号 ${account.accountId} 已停止，缓存已清理`);
-                };
-                return cleanupFn;
+                if (ctx.abortSignal) {
+                    ctx.abortSignal.addEventListener("abort", () => {
+                        console.log(`[QQ] 🛑 收到停止信号，清理已有连接 ${account.accountId}`);
+                        existingClient.disconnect();
+                        unregisterQQClient(account.accountId);
+                        clearMemberCache();
+                        flushRefIndex();
+                        flushKnownUsers();
+                        console.log(`[QQ] 🧹 账号 ${account.accountId} 已停止，缓存已清理`);
+                    });
+                }
+                return new Promise<void>(() => {});
             }
             console.log(`[QQ] Stopping existing client for account ${account.accountId} before restart`);
             existingClient.disconnect();
@@ -1702,7 +1705,7 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
           }
         });
 
-        let resolveStartAccount: ((cleanup: () => void) => void) | null = null;
+        let accountStoppedResolve: (() => void) | null = null;
         const cleanupFn = () => { 
             clearInterval(cleanupInterval);
             client.disconnect(); 
@@ -1711,16 +1714,23 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
             flushRefIndex();
             flushKnownUsers();
             console.log(`[QQ] 🧹 账号 ${account.accountId} 已停止，缓存已清理`);
+            if (accountStoppedResolve) {
+                accountStoppedResolve();
+            }
         };
         
-        if (connectionConfig.mode === "reverse") {
-            console.log(`[QQ] ⏳ 反向WebSocket模式，服务器已启动，立即返回成功`);
-            client.connect();
-            return cleanupFn;
+        if (ctx.abortSignal) {
+            ctx.abortSignal.addEventListener("abort", () => {
+                console.log(`[QQ] 🛑 收到停止信号，清理账号 ${account.accountId}`);
+                cleanupFn();
+            });
         }
-
+        
         client.connect();
-        return cleanupFn;
+        
+        return new Promise<void>((resolve) => {
+            accountStoppedResolve = resolve;
+        });
     },
     logoutAccount: async ({ accountId, cfg }) => {
         return { loggedOut: true, cleared: true };
