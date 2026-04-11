@@ -696,6 +696,7 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
         }
 
         const existingClient = getQQClient(account.accountId);
+        console.log(`[QQ] 🔍 检查现有连接: existingClient=${existingClient ? 'exists' : 'null'}, isConnected=${existingClient?.isConnected()}`);
         if (existingClient) {
             if (existingClient.isConnected()) {
                 console.log(`[QQ] ✅ 账号 ${account.accountId} 已连接，跳过重启`);
