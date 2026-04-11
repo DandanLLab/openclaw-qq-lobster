@@ -697,6 +697,18 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
 
         const existingClient = getQQClient(account.accountId);
         if (existingClient) {
+            if (existingClient.isConnected()) {
+                console.log(`[QQ] ✅ 账号 ${account.accountId} 已连接，跳过重启`);
+                const cleanupFn = () => {
+                    existingClient.disconnect();
+                    unregisterQQClient(account.accountId);
+                    clearMemberCache();
+                    flushRefIndex();
+                    flushKnownUsers();
+                    console.log(`[QQ] 🧹 账号 ${account.accountId} 已停止，缓存已清理`);
+                };
+                return cleanupFn;
+            }
             console.log(`[QQ] Stopping existing client for account ${account.accountId} before restart`);
             existingClient.disconnect();
         }
@@ -1701,22 +1713,9 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
         };
         
         if (connectionConfig.mode === "reverse") {
-            console.log(`[QQ] ⏳ 反向WebSocket模式，等待NapCat连接...`);
-            let connectResolved = false;
-            client.on("connect", () => {
-                if (!connectResolved) {
-                    connectResolved = true;
-                    console.log(`[QQ] ✅ 反向WebSocket模式，NapCat已连接，startAccount完成`);
-                    if (resolveStartAccount) {
-                        resolveStartAccount(cleanupFn);
-                    }
-                }
-            });
-            
-            return new Promise((resolve) => {
-                resolveStartAccount = resolve;
-                client.connect();
-            });
+            console.log(`[QQ] ⏳ 反向WebSocket模式，服务器已启动，立即返回成功`);
+            client.connect();
+            return cleanupFn;
         }
 
         client.connect();
