@@ -544,9 +544,11 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
   },
   status: {
       probeAccount: async ({ account, timeoutMs }) => {
+          console.log(`[QQ] 🔍 probeAccount 被调用! accountId=${account?.accountId}`);
           const config = account.config;
           
           const connectionConfig = resolveConnectionConfig(config);
+          console.log(`[QQ] 🔍 probeAccount: mode=${connectionConfig.mode}, wsUrl=${connectionConfig.wsUrl}, reverseWsPort=${connectionConfig.reverseWsPort}`);
           
           if (connectionConfig.mode === "reverse") {
               console.log(`[QQ] 🔍 probeAccount: 反向WebSocket模式，检查现有连接`);
@@ -674,6 +676,8 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
   },
   gateway: {
     startAccount: async (ctx) => {
+        console.log(`[QQ] 🚀 startAccount 被调用! accountId=${ctx.account?.accountId}, reason=检查调用栈`);
+        console.trace(`[QQ] 🚀 startAccount 调用栈`);
         const { account, cfg } = ctx;
         const config = account.config;
 
@@ -1685,8 +1689,8 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
           }
         });
 
-        client.connect();
-        return () => { 
+        let resolveStartAccount: ((cleanup: () => void) => void) | null = null;
+        const cleanupFn = () => { 
             clearInterval(cleanupInterval);
             client.disconnect(); 
             unregisterQQClient(account.accountId);
@@ -1695,6 +1699,38 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
             flushKnownUsers();
             console.log(`[QQ] 🧹 账号 ${account.accountId} 已停止，缓存已清理`);
         };
+        
+        if (connectionConfig.mode === "reverse") {
+            console.log(`[QQ] ⏳ 反向WebSocket模式，等待NapCat连接...`);
+            let connectResolved = false;
+            client.on("connect", () => {
+                if (!connectResolved) {
+                    connectResolved = true;
+                    console.log(`[QQ] ✅ 反向WebSocket模式，NapCat已连接，startAccount完成`);
+                    if (resolveStartAccount) {
+                        resolveStartAccount(cleanupFn);
+                    }
+                }
+            });
+            
+            setTimeout(() => {
+                if (!connectResolved) {
+                    connectResolved = true;
+                    console.log(`[QQ] ⏳ 反向WebSocket模式，超时但继续运行（等待NapCat连接）`);
+                    if (resolveStartAccount) {
+                        resolveStartAccount(cleanupFn);
+                    }
+                }
+            }, 30000);
+            
+            return new Promise((resolve) => {
+                resolveStartAccount = resolve;
+                client.connect();
+            });
+        }
+
+        client.connect();
+        return cleanupFn;
     },
     logoutAccount: async ({ accountId, cfg }) => {
         return { loggedOut: true, cleared: true };
