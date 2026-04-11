@@ -2,16 +2,19 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
 import { Type } from "@sinclair/typebox";
 import { qqChannel } from "./src/channel.js";
-import { setQQRuntime } from "./src/runtime.js";
+import { setQQRuntime, getQQRuntime } from "./src/runtime.js";
 import { getQQClient, initQQClientManager } from "./src/client.js";
 import { getEmojiManager } from "./src/core/emoji/emojiManager.js";
 import { getCurrentMessageContext } from "./src/messageContext.js";
 import { getPersonInfoManager } from "./src/core/person/personInfoManager.js";
 import { sendProactive, broadcastToKnownUsers, listKnownUsers, getKnownUsersStats } from "./src/proactive.js";
-import { runDiagnostics } from "./src/utils/platform.js";
+import { runDiagnostics, getQQBotDataDir } from "./src/utils/platform.js";
 import { getPackageVersion } from "./src/utils/pkg-version.js";
 import { getRecentLogs } from "./src/log-buffer.js";
 import { getUpdateInfo } from "./src/update-checker.js";
+import { lookupRef, getRefIndexStats } from "./src/ref-index-store.js";
+import { transcribeAudioForNapcat, resolveSTTConfig } from "./src/message-parser.js";
+import { getCachedMemberName } from "./src/member-cache.js";
 
 function registerQQTools(api: OpenClawPluginApi) {
   api.registerTool({
@@ -444,6 +447,632 @@ function registerQQTools(api: OpenClawPluginApi) {
           details: { success: false, error: e.message } 
         };
       }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_lookup_ref",
+    label: "QQ查询引用消息",
+    description: "根据消息ID查询之前记录的消息引用信息。龙虾可以查找历史消息的上下文。",
+    parameters: Type.Object({
+      message_id: Type.String({ description: "要查询的消息ID" }),
+    }),
+    async execute(_toolCallId, params) {
+      try {
+        const ref = lookupRef(params.message_id);
+        if (!ref) {
+          return { 
+            content: [{ type: "text", text: `未找到消息ID ${params.message_id} 的引用记录` }], 
+            details: { success: false, found: false } 
+          };
+        }
+        return { 
+          content: [{ type: "text", text: `消息引用: 发送者 ${ref.sender}，内容: ${ref.text.substring(0, 100)}...` }], 
+          details: { success: true, found: true, ref } 
+        };
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `查询失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_get_ref_stats",
+    label: "QQ引用索引统计",
+    description: "获取消息引用索引的统计信息。",
+    parameters: Type.Object({}),
+    async execute(_toolCallId, _params) {
+      try {
+        const stats = getRefIndexStats();
+        return { 
+          content: [{ type: "text", text: `引用索引统计: ${stats.size}/${stats.maxEntries} 条记录，磁盘行数: ${stats.totalLinesOnDisk}` }], 
+          details: { success: true, stats } 
+        };
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `获取统计失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_transcribe_voice",
+    label: "QQ语音转文字",
+    description: "将语音文件转换为文字。龙虾可以处理用户发送的语音消息。",
+    parameters: Type.Object({
+      audio_path: Type.String({ description: "语音文件路径（本地路径或URL）" }),
+    }),
+    async execute(_toolCallId, params) {
+      try {
+        const runtime = getQQRuntime();
+        const cfg = runtime.config.loadConfig();
+        const transcription = await transcribeAudioForNapcat(params.audio_path, cfg);
+        if (!transcription) {
+          return { 
+            content: [{ type: "text", text: "语音转文字失败：未配置STT服务或转换失败" }], 
+            details: { success: false, reason: "no_stt_config" } 
+          };
+        }
+        return { 
+          content: [{ type: "text", text: `语音转文字结果: ${transcription}` }], 
+          details: { success: true, transcription } 
+        };
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `语音转文字失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_get_member_name",
+    label: "QQ获取群成员名称",
+    description: "从缓存中获取群成员的名称。龙虾可以快速获取群成员信息。",
+    parameters: Type.Object({
+      group_id: Type.Number({ description: "群号" }),
+      user_id: Type.String({ description: "用户ID" }),
+    }),
+    async execute(_toolCallId, params) {
+      try {
+        const name = getCachedMemberName(String(params.group_id), params.user_id);
+        if (!name) {
+          return { 
+            content: [{ type: "text", text: `缓存中未找到群 ${params.group_id} 用户 ${params.user_id} 的名称` }], 
+            details: { success: false, found: false } 
+          };
+        }
+        return { 
+          content: [{ type: "text", text: `群 ${params.group_id} 用户 ${params.user_id} 的名称: ${name}` }], 
+          details: { success: true, found: true, name } 
+        };
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `获取失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_get_logs",
+    label: "QQ获取日志",
+    description: "获取最近的日志记录。龙虾可以查看系统运行日志。",
+    parameters: Type.Object({
+      count: Type.Optional(Type.Number({ description: "获取日志条数，默认20，最大100", default: 20 })),
+    }),
+    async execute(_toolCallId, params) {
+      try {
+        const count = Math.min(Math.max(params.count || 20, 1), 100);
+        const logs = getRecentLogs(count);
+        if (logs.length === 0) {
+          return { 
+            content: [{ type: "text", text: "暂无日志记录" }], 
+            details: { success: true, logs: [] } 
+          };
+        }
+        const logText = logs.map(l => `[${l.level}] ${l.msg}`).join("\n");
+        return { 
+          content: [{ type: "text", text: `最近 ${logs.length} 条日志:\n${logText}` }], 
+          details: { success: true, count: logs.length, logs } 
+        };
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `获取日志失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_check_update",
+    label: "QQ检查更新",
+    description: "检查QQ插件是否有新版本可用。龙虾可以主动检查更新。",
+    parameters: Type.Object({}),
+    async execute(_toolCallId, _params) {
+      try {
+        const info = await getUpdateInfo();
+        if (info.hasUpdate) {
+          return { 
+            content: [{ type: "text", text: `✨ 有新版本 v${info.latest} 可用！当前版本: v${info.current}` }], 
+            details: { success: true, hasUpdate: true, current: info.current, latest: info.latest } 
+          };
+        } else if (info.error) {
+          return { 
+            content: [{ type: "text", text: `检查更新失败: ${info.error}` }], 
+            details: { success: false, error: info.error } 
+          };
+        }
+        return { 
+          content: [{ type: "text", text: `✅ 已是最新版本 v${info.current}` }], 
+          details: { success: true, hasUpdate: false, current: info.current } 
+        };
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `检查更新失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_get_version",
+    label: "QQ获取版本信息",
+    description: "获取QQ插件的版本信息。",
+    parameters: Type.Object({}),
+    async execute(_toolCallId, _params) {
+      try {
+        const version = getPackageVersion(import.meta.url);
+        const nodeVersion = process.version;
+        return { 
+          content: [{ type: "text", text: `OpenClaw QQ 插件 v${version}\nNode.js: ${nodeVersion}` }], 
+          details: { success: true, version, nodeVersion } 
+        };
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `获取版本失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_get_data_dir",
+    label: "QQ获取数据目录",
+    description: "获取QQ插件的数据存储目录路径。",
+    parameters: Type.Object({
+      subpath: Type.Optional(Type.String({ description: "子路径，如 'data', 'temp', 'emoji'" })),
+    }),
+    async execute(_toolCallId, params) {
+      try {
+        const dataDir = getQQBotDataDir(params.subpath || "");
+        return { 
+          content: [{ type: "text", text: `数据目录: ${dataDir}` }], 
+          details: { success: true, path: dataDir } 
+        };
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `获取目录失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_get_person_info",
+    label: "QQ获取用户档案",
+    description: "获取用户的个人信息档案，包括亲密度、互动次数等。龙虾可以了解与用户的关系。",
+    parameters: Type.Object({
+      user_id: Type.Optional(Type.Number({ description: "用户ID（不填则使用当前对话用户）" })),
+      group_id: Type.Optional(Type.Number({ description: "群号（可选，用于获取群内档案）" })),
+    }),
+    async execute(_toolCallId, params) {
+      try {
+        const ctx = getCurrentMessageContext();
+        const userId = params.user_id || ctx?.userId;
+        const groupId = params.group_id || ctx?.groupId;
+        
+        if (!userId) {
+          return { 
+            content: [{ type: "text", text: "无法确定用户ID" }], 
+            details: { success: false } 
+          };
+        }
+        
+        const personManager = getPersonInfoManager();
+        const personInfo = personManager.getPersonInfo(userId, groupId);
+        
+        if (!personInfo) {
+          return { 
+            content: [{ type: "text", text: `未找到用户 ${userId} 的档案信息` }], 
+            details: { success: false, found: false } 
+          };
+        }
+        
+        const info = `用户 ${userId} 档案:\n亲密度: ${personInfo.intimacyLevel?.toFixed(2) || 0}\n互动次数: ${personInfo.interactionCount || 0}\n最后互动: ${personInfo.lastInteraction ? new Date(personInfo.lastInteraction).toLocaleString() : '无'}`;
+        return { 
+          content: [{ type: "text", text: info }], 
+          details: { success: true, found: true, personInfo } 
+        };
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `获取档案失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_record_interaction",
+    label: "QQ记录互动",
+    description: "手动记录与用户的互动。龙虾可以主动记录重要的互动事件。",
+    parameters: Type.Object({
+      user_id: Type.Optional(Type.Number({ description: "用户ID（不填则使用当前对话用户）" })),
+      user_name: Type.Optional(Type.String({ description: "用户名称" })),
+      group_id: Type.Optional(Type.Number({ description: "群号（可选）" })),
+      group_name: Type.Optional(Type.String({ description: "群名称" })),
+    }),
+    async execute(_toolCallId, params) {
+      try {
+        const ctx = getCurrentMessageContext();
+        const userId = params.user_id || ctx?.userId;
+        const userName = params.user_name || ctx?.senderName || String(userId);
+        const groupId = params.group_id || ctx?.groupId;
+        const groupName = params.group_name;
+        
+        if (!userId) {
+          return { 
+            content: [{ type: "text", text: "无法确定用户ID" }], 
+            details: { success: false } 
+          };
+        }
+        
+        const personManager = getPersonInfoManager();
+        personManager.recordInteraction(userId, groupId, userName);
+        
+        if (groupId && groupName) {
+          personManager.updatePersonInfo({ userId, groupId, groupName });
+        }
+        
+        return { 
+          content: [{ type: "text", text: `已记录与用户 ${userName}(${userId}) 的互动` }], 
+          details: { success: true, userId, groupId } 
+        };
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `记录互动失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_list_known_users",
+    label: "QQ列出已知用户",
+    description: "列出已知的用户列表。龙虾可以查看最近互动过的用户。",
+    parameters: Type.Object({
+      limit: Type.Optional(Type.Number({ description: "返回数量，默认10", default: 10 })),
+      type: Type.Optional(Type.Union([Type.Literal("private"), Type.Literal("group"), Type.Literal("guild")])),
+    }),
+    async execute(_toolCallId, params) {
+      try {
+        const users = listKnownUsers({
+          limit: params.limit || 10,
+          type: params.type as any,
+          sortBy: "lastSeenAt",
+          sortOrder: "desc",
+        });
+        
+        if (users.length === 0) {
+          return { 
+            content: [{ type: "text", text: "暂无已知用户记录" }], 
+            details: { success: true, users: [] } 
+          };
+        }
+        
+        const userList = users.map((u, i) => `${i + 1}. ${u.nickname || u.openid} (${u.type}) - 互动${u.interactionCount}次`).join("\n");
+        return { 
+          content: [{ type: "text", text: `已知用户列表:\n${userList}` }], 
+          details: { success: true, count: users.length, users } 
+        };
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `获取用户列表失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_forward_to_group",
+    label: "QQ跨频道转发消息到群",
+    description: "将消息转发到指定的群。管理员可以直接转发，普通用户需要龙虾判断内容是否合适。常用于私聊中请求龙虾帮忙在群里发布消息。",
+    parameters: Type.Object({
+      group_id: Type.Optional(Type.Number({ description: "目标群号（不填则发送到主群）" })),
+      message: Type.String({ description: "要转发的消息内容" }),
+      source_context: Type.Optional(Type.String({ description: "消息来源说明，如'用户XXX在私聊中请求转发'" })),
+    }),
+    async execute(_toolCallId, params) {
+      const client = getQQClient("default");
+      if (!client) {
+        return { content: [{ type: "text", text: "QQ客户端未连接" }], details: { success: false } };
+      }
+      
+      const ctx = getCurrentMessageContext();
+      const runtime = getQQRuntime();
+      const cfg = runtime.config.loadConfig() as any;
+      const qqConfig = cfg?.channels?.qq || {};
+      
+      const targetGroupId = params.group_id || qqConfig.primaryGroup;
+      
+      if (!targetGroupId) {
+        return { 
+          content: [{ type: "text", text: "未指定目标群号，且未配置主群。请指定group_id或配置primaryGroup。" }], 
+          details: { success: false, reason: "no_target_group" } 
+        };
+      }
+      
+      const isAdmin = ctx && qqConfig.admins?.includes(ctx.userId);
+      const isPrivateChat = ctx && !ctx.isGroup;
+      
+      if (isPrivateChat && !isAdmin) {
+        const sourceInfo = params.source_context || `用户${ctx?.userId}在私聊中请求`;
+        return { 
+          content: [{ 
+            type: "text", 
+            text: `【需要判断】${sourceInfo}转发以下消息到群 ${targetGroupId}:\n"${params.message.substring(0, 100)}..."\n\n请判断内容是否合适后再决定是否发送。` 
+          }], 
+          details: { 
+            success: false, 
+            needsJudgment: true, 
+            group_id: targetGroupId, 
+            message: params.message,
+            source_user_id: ctx?.userId,
+            is_admin: false 
+          } 
+        };
+      }
+      
+      try {
+        await client.sendGroupMsg(targetGroupId, params.message);
+        console.log(`[QQ] 📤 跨频道转发消息到群 ${targetGroupId}: ${params.message.substring(0, 50)}...`);
+        return { 
+          content: [{ type: "text", text: `✅ 消息已发送到群 ${targetGroupId}` }], 
+          details: { success: true, group_id: targetGroupId, message_length: params.message.length } 
+        };
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `发送失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_send_to_primary_group",
+    label: "QQ发送消息到主群",
+    description: "发送消息到主群。龙虾可以主动在主群发布通知或消息。需要配置了primaryGroup。",
+    parameters: Type.Object({
+      message: Type.String({ description: "要发送的消息内容" }),
+      mention_all: Type.Optional(Type.Boolean({ description: "是否@全体成员", default: false })),
+    }),
+    async execute(_toolCallId, params) {
+      const client = getQQClient("default");
+      if (!client) {
+        return { content: [{ type: "text", text: "QQ客户端未连接" }], details: { success: false } };
+      }
+      
+      const runtime = getQQRuntime();
+      const cfg = runtime.config.loadConfig() as any;
+      const primaryGroup = cfg?.channels?.qq?.primaryGroup;
+      
+      if (!primaryGroup) {
+        return { 
+          content: [{ type: "text", text: "未配置主群（primaryGroup）。请先在配置中设置主群号。" }], 
+          details: { success: false, reason: "no_primary_group" } 
+        };
+      }
+      
+      try {
+        let message = params.message;
+        if (params.mention_all) {
+          message = `[CQ:at,qq=all] ${message}`;
+        }
+        await client.sendGroupMsg(primaryGroup, message);
+        console.log(`[QQ] 📤 发送消息到主群 ${primaryGroup}: ${params.message.substring(0, 50)}...`);
+        return { 
+          content: [{ type: "text", text: `✅ 消息已发送到主群 ${primaryGroup}` }], 
+          details: { success: true, group_id: primaryGroup, message_length: params.message.length } 
+        };
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `发送失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_cross_channel_reply",
+    label: "QQ跨频道回复",
+    description: "在私聊中回复时，同时将回复发送到指定群。适用于用户在私聊中讨论，但希望龙虾在群里也回复的情况。",
+    parameters: Type.Object({
+      group_id: Type.Optional(Type.Number({ description: "目标群号（不填则发送到主群）" })),
+      group_message: Type.String({ description: "发送到群的消息" }),
+      private_message: Type.Optional(Type.String({ description: "发送给当前私聊用户的消息（可选）" })),
+    }),
+    async execute(_toolCallId, params) {
+      const client = getQQClient("default");
+      if (!client) {
+        return { content: [{ type: "text", text: "QQ客户端未连接" }], details: { success: false } };
+      }
+      
+      const ctx = getCurrentMessageContext();
+      const runtime = getQQRuntime();
+      const cfg = runtime.config.loadConfig() as any;
+      const qqConfig = cfg?.channels?.qq || {};
+      
+      const targetGroupId = params.group_id || qqConfig.primaryGroup;
+      
+      if (!targetGroupId) {
+        return { 
+          content: [{ type: "text", text: "未指定目标群号，且未配置主群。" }], 
+          details: { success: false, reason: "no_target_group" } 
+        };
+      }
+      
+      const results: { group: boolean; private: boolean } = { group: false, private: false };
+      
+      try {
+        await client.sendGroupMsg(targetGroupId, params.group_message);
+        results.group = true;
+        console.log(`[QQ] 📤 跨频道回复到群 ${targetGroupId}`);
+      } catch (e: any) {
+        console.error(`[QQ] 发送到群失败: ${e.message}`);
+      }
+      
+      if (params.private_message && ctx && !ctx.isGroup) {
+        try {
+          await client.sendPrivateMsg(ctx.userId, params.private_message);
+          results.private = true;
+          console.log(`[QQ] 📤 跨频道回复到私聊 ${ctx.userId}`);
+        } catch (e: any) {
+          console.error(`[QQ] 发送到私聊失败: ${e.message}`);
+        }
+      }
+      
+      const summary = [];
+      if (results.group) summary.push(`群 ${targetGroupId} ✓`);
+      if (results.private) summary.push(`私聊 ✓`);
+      if (!results.group && !results.private) summary.push("全部失败 ✗");
+      
+      return { 
+        content: [{ type: "text", text: `跨频道回复结果: ${summary.join(", ")}` }], 
+        details: { success: results.group, results, group_id: targetGroupId } 
+      };
+    },
+  });
+
+  api.registerTool({
+    name: "qq_broadcast_to_groups",
+    label: "QQ广播到多个群",
+    description: "将消息广播到多个群。管理员可以直接广播，普通用户需要龙虾判断。适用于发布通知、公告等。",
+    parameters: Type.Object({
+      group_ids: Type.Optional(Type.Array(Type.Number({ description: "目标群号列表（不填则发送到所有已知群）" }))),
+      message: Type.String({ description: "要广播的消息内容" }),
+      include_primary: Type.Optional(Type.Boolean({ description: "是否包含主群", default: true })),
+    }),
+    async execute(_toolCallId, params) {
+      const client = getQQClient("default");
+      if (!client) {
+        return { content: [{ type: "text", text: "QQ客户端未连接" }], details: { success: false } };
+      }
+      
+      const ctx = getCurrentMessageContext();
+      const runtime = getQQRuntime();
+      const cfg = runtime.config.loadConfig() as any;
+      const qqConfig = cfg?.channels?.qq || {};
+      
+      const isAdmin = ctx && qqConfig.admins?.includes(ctx.userId);
+      
+      if (!isAdmin) {
+        return { 
+          content: [{ 
+            type: "text", 
+            text: `【需要管理员权限】广播功能需要管理员权限。当前用户不是管理员。` 
+          }], 
+          details: { success: false, needsAdmin: true } 
+        };
+      }
+      
+      let targetGroups = params.group_ids || [];
+      
+      if (targetGroups.length === 0) {
+        if (qqConfig.primaryGroup && params.include_primary !== false) {
+          targetGroups.push(qqConfig.primaryGroup);
+        }
+        if (qqConfig.allowedGroups && qqConfig.allowedGroups.length > 0) {
+          targetGroups = [...new Set([...targetGroups, ...qqConfig.allowedGroups])];
+        }
+      }
+      
+      if (targetGroups.length === 0) {
+        return { 
+          content: [{ type: "text", text: "没有可用的目标群。请配置primaryGroup或allowedGroups，或指定group_ids。" }], 
+          details: { success: false, reason: "no_target_groups" } 
+        };
+      }
+      
+      const results: { group_id: number; success: boolean; error?: string }[] = [];
+      
+      for (const groupId of targetGroups) {
+        try {
+          await client.sendGroupMsg(groupId, params.message);
+          results.push({ group_id: groupId, success: true });
+          await new Promise(r => setTimeout(r, 500));
+        } catch (e: any) {
+          results.push({ group_id: groupId, success: false, error: e.message });
+        }
+      }
+      
+      const successCount = results.filter(r => r.success).length;
+      const failCount = results.filter(r => !r.success).length;
+      
+      return { 
+        content: [{ type: "text", text: `广播完成: 成功 ${successCount}/${results.length}，失败 ${failCount}` }], 
+        details: { success: successCount > 0, results, total: results.length, successCount, failCount } 
+      };
+    },
+  });
+
+  api.registerTool({
+    name: "qq_get_primary_group",
+    label: "QQ获取主群信息",
+    description: "获取主群的配置信息。龙虾可以了解主群是哪个群。",
+    parameters: Type.Object({}),
+    async execute(_toolCallId, _params) {
+      const runtime = getQQRuntime();
+      const cfg = runtime.config.loadConfig() as any;
+      const qqConfig = cfg?.channels?.qq || {};
+      const primaryGroup = qqConfig.primaryGroup;
+      
+      if (!primaryGroup) {
+        return { 
+          content: [{ type: "text", text: "未配置主群（primaryGroup）。" }], 
+          details: { success: false, hasPrimaryGroup: false } 
+        };
+      }
+      
+      const groupConfig = qqConfig.groupChannels?.[String(primaryGroup)] || {};
+      
+      return { 
+        content: [{ 
+          type: "text", 
+          text: `主群信息:\n群号: ${primaryGroup}\n群名: ${groupConfig.name || '未配置'}\n优先级: ${groupConfig.priority || 0}` 
+        }], 
+        details: { 
+          success: true, 
+          hasPrimaryGroup: true, 
+          primaryGroup,
+          groupConfig 
+        } 
+      };
     },
   });
 }

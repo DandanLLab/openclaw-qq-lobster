@@ -5,7 +5,7 @@ import { execFile } from "node:child_process";
 import { decode, encode, isSilk } from "silk-wasm";
 import { detectFfmpeg, isWindows } from "./platform.js";
 
-function isSilkFile(filePath: string): boolean {
+export function isSilkFile(filePath: string): boolean {
   try {
     const buf = fs.readFileSync(filePath);
     return isSilk(new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength));

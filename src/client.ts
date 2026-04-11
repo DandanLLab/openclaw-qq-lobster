@@ -1,4 +1,4 @@
-import WebSocket from "ws";
+import WebSocket, { WebSocketServer } from "ws";
 import http from "node:http";
 import EventEmitter from "events";
 import type { OneBotEvent, OneBotMessage, OneBotMessageSegment } from "./types.js";
@@ -176,7 +176,7 @@ export class OneBotClient extends EventEmitter {
       res.writeHead(404).end();
     });
 
-    const wss = new WebSocket.Server({ server: this.reverseWsServer });
+    const wss = new WebSocketServer({ server: this.reverseWsServer });
 
     wss.on("connection", (ws, req) => {
       console.log(`[QQ] 🔄 NapCat 已连接到反向 WebSocket 服务器`);

@@ -82,6 +82,9 @@ export const QQConfigSchema = z.object({
   autoSendEmoji: z.boolean().optional().default(false).describe("自动发送表情"),
   autoSendEmojiProbability: z.number().optional().default(0.3).describe("自动发送表情概率"),
   autoSendEmojiMinIntensity: z.number().optional().default(0.5).describe("自动发送表情最小情感强度"),
+  autoPopulateMemberCache: z.boolean().optional().default(true).describe("连接时自动预加载群成员缓存"),
+  enableVoiceTranscription: z.boolean().optional().default(true).describe("启用语音消息转文字"),
+  enableTypingIndicator: z.boolean().optional().default(true).describe("启用输入状态指示器"),
 });
 
 export type QQConfig = z.infer<typeof QQConfigSchema>;

@@ -46,12 +46,12 @@ import {
 import { pluginManager, type PluginContext } from "./plugins/index.js";
 import { handleAdminCommand } from "./admin-commands.js";
 import { triggerUpdateCheck } from "./update-checker.js";
-import { installGlobalInterceptor, getRecentLogs } from "./log-buffer.js";
+import { installGlobalInterceptor } from "./log-buffer.js";
 import { populateGroupMemberCache, getCachedMemberName, setCachedMemberName, clearMemberCache } from "./member-cache.js";
 import { initRefIndexStore, recordRef, lookupRef, flushRefIndex } from "./ref-index-store.js";
 import { TypingKeepAlive } from "./typing-keepalive.js";
 import { UploadCache } from "./upload-cache.js";
-import { DeliverDebouncer, createDeliverDebouncer } from "./deliver-debounce.js";
+import { createDeliverDebouncer } from "./deliver-debounce.js";
 import { recordKnownUser, getKnownUsersStats, flushKnownUsers } from "./known-users.js";
 import { registerClientsMap, sendProactive, broadcastToKnownUsers } from "./proactive.js";
 import { cleanCQCodes, extractImageUrls, getReplyMessageId, splitMessage, stripMarkdown, processAntiRisk, resolveMediaUrl, isImageFile, transcribeAudioForNapcat, convertSilkToWav, normalizeTarget } from "./message-parser.js";
@@ -724,6 +724,18 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                     channel: "qq", accountId: account.accountId, direction: "inbound", 
                  });
                 await botContext.initialize();
+                
+                if (config.autoPopulateMemberCache !== false) {
+                    try {
+                        const groups = await client.getGroupList();
+                        for (const g of groups.slice(0, 5)) {
+                            populateGroupMemberCache(client, g.group_id).catch(() => {});
+                        }
+                        console.log(`[QQ] 📋 预加载群成员缓存: ${Math.min(groups.length, 5)} 个群`);
+                    } catch (e) {
+                        console.warn(`[QQ] 预加载群成员缓存失败:`, e);
+                    }
+                }
              } catch (err) {
                 console.warn(`[QQ] getLoginInfo failed, will rely on meta_event for selfId: ${err}`);
              }
@@ -836,8 +848,51 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                             }
                         }
                         resolvedText += ` @${name} `;
-                    } else if (seg.type === "record") resolvedText += ` [语音消息]${seg.data?.text ? `(${seg.data.text})` : ""}`;
-                    else if (seg.type === "image") {
+                    } else if (seg.type === "record") {
+                        resolvedText += ` [语音消息]`;
+                        if (config.enableVoiceTranscription !== false && seg.data?.url) {
+                            try {
+                                const audioUrl = seg.data.url;
+                                const tempDir = getQQBotDataDir("temp");
+                                const audioFileName = `voice_${Date.now()}.silk`;
+                                const audioPath = path.join(tempDir, audioFileName);
+                                
+                                if (audioUrl.startsWith("http")) {
+                                    const audioResp = await fetch(audioUrl);
+                                    const audioBuffer = Buffer.from(await audioResp.arrayBuffer());
+                                    await fs.writeFile(audioPath, audioBuffer);
+                                } else if (audioUrl.startsWith("base64://")) {
+                                    const audioBase64 = audioUrl.replace("base64://", "");
+                                    await fs.writeFile(audioPath, Buffer.from(audioBase64, "base64"));
+                                } else if (audioUrl.startsWith("file://")) {
+                                    const localPath = audioUrl.replace("file://", "");
+                                    await fs.copyFile(localPath, audioPath);
+                                }
+                                
+                                let wavPath = audioPath;
+                                if (audioPath.endsWith(".silk") || audioPath.endsWith(".amr")) {
+                                    const convertResult = await convertSilkToWav(audioPath);
+                                    if (convertResult) {
+                                        wavPath = convertResult.wavPath;
+                                        console.log(`[QQ] 🎵 SILK/AMR 转换为 WAV: ${wavPath}, 时长: ${convertResult.duration}ms`);
+                                    }
+                                }
+                                
+                                const transcription = await transcribeAudioForNapcat(wavPath, cfg);
+                                if (transcription) {
+                                    resolvedText += `(转文字: ${transcription})`;
+                                    console.log(`[QQ] 🎤 语音转文字成功: ${transcription.substring(0, 50)}...`);
+                                }
+                                
+                                await fs.unlink(audioPath).catch(() => {});
+                                if (wavPath !== audioPath) await fs.unlink(wavPath).catch(() => {});
+                            } catch (e) {
+                                console.warn(`[QQ] 语音转文字失败:`, e);
+                            }
+                        } else if (seg.data?.text) {
+                            resolvedText += `(${seg.data.text})`;
+                        }
+                    } else if (seg.type === "image") {
                         const imgUrl = seg.data?.url || seg.data?.file;
                         const subType = seg.data?.subType;
                         
@@ -1058,12 +1113,39 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                 const cmd = parts[0];
                 if (cmd === '/status') {
                     const stats = botContext.getStats();
-                    const statusMsg = `[OpenClaw QQ]\n状态: 已连接\n机器人ID: ${client.getSelfId()}\n内存: ${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2)} MB\n用户档案: ${stats.persons}\n知识条目: ${stats.knowledge}\n表达学习: ${stats.expressions}\n梦境记录: ${stats.dreams}`;
+                    const userStats = getKnownUsersStats(account.accountId);
+                    const dataDir = getQQBotDataDir();
+                    const version = getPackageVersion(import.meta.url);
+                    const statusMsg = `[OpenClaw QQ] v${version}\n状态: 已连接\n机器人ID: ${client.getSelfId()}\n内存: ${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2)} MB\n用户档案: ${stats.persons}\n已知用户: ${userStats.totalUsers} (24h活跃: ${userStats.activeIn24h})\n数据目录: ${dataDir}`;
                     if (isGroup) client.sendGroupMsg(groupId, statusMsg); else client.sendPrivateMsg(userId, statusMsg);
                     return;
                 }
+                if (cmd === '/diagnostics' || cmd === '/diag') {
+                    const diag = await runDiagnostics();
+                    let diagMsg = `🔍 环境诊断\n平台: ${diag.platform}\nNode: ${diag.nodeVersion}\nffmpeg: ${diag.ffmpeg ?? "未安装"}\nsilk-wasm: ${diag.silkWasm ? "可用" : "不可用"}`;
+                    if (diag.warnings.length > 0) {
+                        diagMsg += `\n⚠️ 警告:\n${diag.warnings.join("\n")}`;
+                    }
+                    if (isGroup) client.sendGroupMsg(groupId, diagMsg); else client.sendPrivateMsg(userId, diagMsg);
+                    return;
+                }
+                if (cmd === '/send' && parts.length >= 3) {
+                    const target = parts[1];
+                    const message = parts.slice(2).join(" ");
+                    const result = await sendProactive({ to: target, text: message, accountId: account.accountId });
+                    const sendMsg = result.success ? `✅ 已发送到 ${target}` : `❌ 发送失败: ${result.error}`;
+                    if (isGroup) client.sendGroupMsg(groupId, sendMsg); else client.sendPrivateMsg(userId, sendMsg);
+                    return;
+                }
+                if (cmd === '/broadcast' && parts.length >= 2) {
+                    const message = parts.slice(1).join(" ");
+                    const result = await broadcastToKnownUsers(message, { accountId: account.accountId, activeWithin: 7 * 24 * 60 * 60 * 1000 });
+                    const bcMsg = `📢 广播完成: 成功 ${result.sent}, 失败 ${result.failed}`;
+                    if (isGroup) client.sendGroupMsg(groupId, bcMsg); else client.sendPrivateMsg(userId, bcMsg);
+                    return;
+                }
                 if (cmd === '/help') {
-                    const helpMsg = `[OpenClaw QQ]\n/status - 状态\n/mute @用户 [分] - 禁言\n/kick @用户 - 踢出\n/learn <模式> <替换> - 学习表达\n/help - 帮助`;
+                    const helpMsg = `[OpenClaw QQ]\n/status - 状态\n/diagnostics - 环境诊断\n/send <目标> <消息> - 主动发送消息\n/broadcast <消息> - 广播给已知用户\n/mute @用户 [分] - 禁言\n/kick @用户 - 踢出\n/learn <模式> <替换> - 学习表达\n/help - 帮助`;
                     if (isGroup) client.sendGroupMsg(groupId, helpMsg); else client.sendPrivateMsg(userId, helpMsg);
                     return;
                 }
@@ -1099,6 +1181,32 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
             const replyMsgId = getReplyMessageId(event.message, text);
             if (replyMsgId) {
                 try { repliedMsg = await client.getMsg(replyMsgId); } catch (err) {}
+            }
+            
+            if (!repliedMsg && replyMsgId) {
+                const refEntry = lookupRef(replyMsgId, account.accountId);
+                if (refEntry) {
+                    repliedMsg = {
+                        message: refEntry.text,
+                        raw_message: refEntry.text,
+                        sender: { 
+                            nickname: refEntry.sender, 
+                            user_id: refEntry.senderId 
+                        }
+                    };
+                    console.log(`[QQ] 📎 从引用索引找到回复消息: ${refEntry.text.substring(0, 50)}...`);
+                }
+            }
+            
+            if (event.message_id) {
+                recordRef({
+                    msgId: String(event.message_id),
+                    text: text.substring(0, 500),
+                    sender: event.sender?.nickname || String(userId),
+                    senderId: String(userId),
+                    timestamp: event.time * 1000,
+                    accountId: account.accountId,
+                });
             }
             
             let historyContext = "";
@@ -1306,7 +1414,7 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
             let lastDeliverTime = 0;
             const DELIVER_COOLDOWN_MS = 1000;
 
-            const deliver = async (payload: ReplyPayload) => {
+            const baseDeliver = async (payload: ReplyPayload) => {
                  const now = Date.now();
                  if (now - lastDeliverTime < DELIVER_COOLDOWN_MS) {
                      console.log(`[QQ] ⚠️ 检测到重复发送请求，跳过 (间隔: ${now - lastDeliverTime}ms)`);
@@ -1419,6 +1527,17 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                  }
             };
 
+            const deliverDebouncer = createDeliverDebouncer(
+                config.deliverDebounce,
+                baseDeliver,
+                { info: console.log, error: console.error },
+                "[QQ debounce]"
+            );
+            
+            const deliver = deliverDebouncer 
+                ? (payload: ReplyPayload) => deliverDebouncer.deliver(payload, { kind: "reply" })
+                : baseDeliver;
+
             const { dispatcher, replyOptions } = runtime.channel.reply.createReplyDispatcherWithTyping({ deliver });
 
             let replyToBody = "";
@@ -1487,6 +1606,11 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
             console.log(`[QQ] 开始生成回复, useCustomModelCaller=${config.useCustomModelCaller}`);
             console.log(`[QQ] 🦞 消息已发送到龙虾核心，等待AI生成回复...`);
 
+            const typingKeepAlive = config.enableTypingIndicator !== false 
+                ? new TypingKeepAlive(client, isGroup, groupId, userId)
+                : null;
+            typingKeepAlive?.start();
+
             try {
                 const useCustomReply = config.useCustomModelCaller === true;
                 
@@ -1525,6 +1649,7 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                 console.error("[QQ] 回复生成错误:", error);
                 if (config.enableErrorNotify) deliver({ text: "⚠️ 服务调用失败，请稍后重试。" });
             } finally {
+                typingKeepAlive?.stop();
                 messageQueueManager.finishProcessing(fromId, userId);
             }
             
@@ -1538,7 +1663,11 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
         return () => { 
             clearInterval(cleanupInterval);
             client.disconnect(); 
-            unregisterQQClient(account.accountId); 
+            unregisterQQClient(account.accountId);
+            clearMemberCache();
+            flushRefIndex();
+            flushKnownUsers();
+            console.log(`[QQ] 🧹 账号 ${account.accountId} 已停止，缓存已清理`);
         };
     },
     logoutAccount: async ({ accountId, cfg }) => {
