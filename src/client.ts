@@ -69,7 +69,9 @@ export class OneBotClient extends EventEmitter {
   }
 
   isConnected(): boolean {
-    return this.ws?.readyState === WebSocket.OPEN;
+    if (this.ws?.readyState === WebSocket.OPEN) return true;
+    if (this.options.reverseWsPort && this.reverseWsServer) return true;
+    return false;
   }
 
   async waitForConnection(timeoutMs: number = 5000): Promise<boolean> {
