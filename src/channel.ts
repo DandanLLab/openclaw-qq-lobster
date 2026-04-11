@@ -1713,16 +1713,6 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                 }
             });
             
-            setTimeout(() => {
-                if (!connectResolved) {
-                    connectResolved = true;
-                    console.log(`[QQ] ⏳ 反向WebSocket模式，超时但继续运行（等待NapCat连接）`);
-                    if (resolveStartAccount) {
-                        resolveStartAccount(cleanupFn);
-                    }
-                }
-            }, 30000);
-            
             return new Promise((resolve) => {
                 resolveStartAccount = resolve;
                 client.connect();

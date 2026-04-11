@@ -250,10 +250,15 @@ export class OneBotClient extends EventEmitter {
       console.error(`[QQ] WebSocketServer 错误: ${err.message}`);
     });
 
-    this.reverseWsServer.on("error", (err) => {
+    this.reverseWsServer.on("error", (err: any) => {
       console.error(`[QQ] 反向 WebSocket 服务器错误: ${err.message}`);
-      if ((err as any).code === "EADDRINUSE") {
-        console.error(`[QQ] 端口 ${port} 已被占用，请检查是否有其他程序占用`);
+      if (err.code === "EADDRINUSE") {
+        console.warn(`[QQ] ⚠️ 端口 ${port} 已被占用，等待 2 秒后重试...`);
+        setTimeout(() => {
+          if (this.reverseWsServer) {
+            this.reverseWsServer.listen(port, "0.0.0.0");
+          }
+        }, 2000);
       }
     });
 
@@ -626,8 +631,12 @@ export class OneBotClient extends EventEmitter {
   disconnect() {
     this.cleanup();
     if (this.reverseWsServer) {
-      this.reverseWsServer.close();
+      console.log(`[QQ] 🛑 关闭反向 WebSocket 服务器...`);
+      const server = this.reverseWsServer;
       this.reverseWsServer = null;
+      server.close(() => {
+        console.log(`[QQ] ✅ 反向 WebSocket 服务器已关闭`);
+      });
     }
   }
 }
