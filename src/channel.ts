@@ -15,7 +15,7 @@ import {
   migrateBaseNameToDefaultAccount,
 } from "openclaw/plugin-sdk/core";
 import { OneBotClient, registerQQClient, unregisterQQClient, getQQClient } from "./client.js";
-import { QQConfigSchema, type QQConfig, getGroupConfig, isPrimaryGroup, shouldRespondToGroup, type GroupChannelConfig } from "./config.js";
+import { QQConfigSchema, type QQConfig, getGroupConfig, isPrimaryGroup, shouldRespondToGroup, type GroupChannelConfig, resolveConnectionConfig } from "./config.js";
 import { getQQRuntime } from "./runtime.js";
 import type { OneBotMessage } from "./types.js";
 import { HeartFCChat } from "./core/heartflow/index.js";
@@ -44,13 +44,26 @@ import {
   getProviders,
 } from "./core/modelCaller.js";
 import { pluginManager, type PluginContext } from "./plugins/index.js";
+import { handleAdminCommand } from "./admin-commands.js";
+import { triggerUpdateCheck } from "./update-checker.js";
+import { installGlobalInterceptor, getRecentLogs } from "./log-buffer.js";
+import { populateGroupMemberCache, getCachedMemberName, setCachedMemberName, clearMemberCache } from "./member-cache.js";
+import { initRefIndexStore, recordRef, lookupRef, flushRefIndex } from "./ref-index-store.js";
+import { TypingKeepAlive } from "./typing-keepalive.js";
+import { UploadCache } from "./upload-cache.js";
+import { DeliverDebouncer, createDeliverDebouncer } from "./deliver-debounce.js";
+import { recordKnownUser, getKnownUsersStats, flushKnownUsers } from "./known-users.js";
+import { registerClientsMap, sendProactive, broadcastToKnownUsers } from "./proactive.js";
+import { cleanCQCodes, extractImageUrls, getReplyMessageId, splitMessage, stripMarkdown, processAntiRisk, resolveMediaUrl, isImageFile, transcribeAudioForNapcat, convertSilkToWav, normalizeTarget } from "./message-parser.js";
+import { runDiagnostics, getQQBotDataDir } from "./utils/platform.js";
+import { getPackageVersion } from "./utils/pkg-version.js";
 
 export type ResolvedQQAccount = ChannelAccountSnapshot & {
   config: QQConfig;
   client?: OneBotClient;
 };
 
-const memberCache = new Map<string, { name: string, time: number }>();
+const clientsMap = new Map<string, OneBotClient>();
 
 class QQBotContext {
   private personManager = getPersonInfoManager();
@@ -185,103 +198,6 @@ class QQBotContext {
 
 const botContext = new QQBotContext();
 
-function getCachedMemberName(groupId: string, userId: string): string | null {
-    const key = `${groupId}:${userId}`;
-    const cached = memberCache.get(key);
-    if (cached && Date.now() - cached.time < 3600000) { // 1 hour cache
-        return cached.name;
-    }
-    return null;
-}
-
-function setCachedMemberName(groupId: string, userId: string, name: string) {
-    memberCache.set(`${groupId}:${userId}`, { name, time: Date.now() });
-}
-
-function extractImageUrls(message: OneBotMessage | string | undefined, maxImages = 3): string[] {
-  const urls: string[] = [];
-  
-  if (Array.isArray(message)) {
-    for (const segment of message) {
-      if (segment.type === "image") {
-        const url = segment.data?.url || (typeof segment.data?.file === 'string' && (segment.data.file.startsWith('http') || segment.data.file.startsWith('base64://')) ? segment.data.file : undefined);
-        if (url) {
-          urls.push(url);
-          if (urls.length >= maxImages) break;
-        }
-      }
-    }
-  } else if (typeof message === "string") {
-    const imageRegex = /\[CQ:image,[^\]]*(?:url|file)=([^,\]]+)[^\]]*\]/g;
-    let match;
-    while ((match = imageRegex.exec(message)) !== null) {
-      const val = match[1].replace(/&amp;/g, "&");
-      if (val.startsWith("http") || val.startsWith("base64://")) {
-        urls.push(val);
-        if (urls.length >= maxImages) break;
-      }
-    }
-  }
-  
-  return urls;
-}
-
-function cleanCQCodes(text: string | undefined): string {
-  if (!text) return "";
-  
-  let result = text;
-  const imageUrls: string[] = [];
-  
-  // Match both url= and file= if they look like URLs
-  const imageRegex = /\[CQ:image,[^\]]*(?:url|file)=([^,\]]+)[^\]]*\]/g;
-  let match;
-  while ((match = imageRegex.exec(text)) !== null) {
-    const val = match[1].replace(/&amp;/g, "&");
-    if (val.startsWith("http")) {
-      imageUrls.push(val);
-    }
-  }
-
-  result = result.replace(/\[CQ:face,id=(\d+)\]/g, "[表情]");
-  
-  result = result.replace(/\[CQ:[^\]]+\]/g, (match) => {
-    if (match.startsWith("[CQ:image")) {
-      return "[图片]";
-    }
-    return "";
-  });
-  
-  result = result.replace(/\s+/g, " ").trim();
-  
-  if (imageUrls.length > 0) {
-    result = result ? `${result} [图片: ${imageUrls.join(", ")}]` : `[图片: ${imageUrls.join(", ")}]`;
-  }
-  
-  return result;
-}
-
-function getReplyMessageId(message: OneBotMessage | string | undefined, rawMessage?: string): string | null {
-  if (message && typeof message !== "string") {
-    for (const segment of message) {
-      if (segment.type === "reply" && segment.data?.id) {
-        const id = String(segment.data.id).trim();
-        if (id && /^-?\d+$/.test(id)) {
-          return id;
-        }
-      }
-    }
-  }
-  if (rawMessage) {
-    const match = rawMessage.match(/\[CQ:reply,id=(\d+)\]/);
-    if (match) return match[1];
-  }
-  return null;
-}
-
-function normalizeTarget(raw: string): string {
-  return raw.replace(/^(qq:)/i, "");
-}
-
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 interface CommandContext {
@@ -298,14 +214,42 @@ interface CommandContext {
 async function handleCommand(text: string, ctx: CommandContext): Promise<boolean> {
   const { userId, groupId, isGroup, isAdmin, client, config, groupConfig, cfg } = ctx;
   
+  const hasAdmins = config.admins && config.admins.length > 0;
+  const adminCommands = ["/ping", "/version", "/logs", "/status", "/mute", "/kick", "/ban", "/help"];
+  const isAdminCommand = adminCommands.some(cmd => text.startsWith(cmd));
+  
+  if (isAdminCommand) {
+    if (!hasAdmins) {
+      console.log(`[QQ] 管理员命令 ${text.split(" ")[0]} 被忽略：未配置管理员`);
+      return false;
+    }
+    if (!isAdmin) {
+      console.log(`[QQ] 非管理员用户 ${userId} 尝试使用管理员命令 ${text.split(" ")[0]}，已忽略`);
+      return false;
+    }
+    
+    const parts = text.trim().split(/\s+/);
+    const cmd = parts[0].toLowerCase();
+    
+    const adminCtx = {
+      client,
+      isGroup,
+      groupId,
+      userId,
+      text,
+      message: undefined as any,
+      eventTime: Date.now(),
+    };
+    
+    const handled = await handleAdminCommand(cmd, parts, adminCtx);
+    if (handled) return true;
+  }
+  
   if (isGroup) {
     if (config.allowedGroups && config.allowedGroups.length > 0) {
       if (!config.allowedGroups.includes(groupId!)) {
         return true;
       }
-    }
-    if (!isAdmin) {
-      return true;
     }
   }
   
@@ -505,56 +449,6 @@ async function handleCommand(text: string, ctx: CommandContext): Promise<boolean
   }
   
   return false;
-}
-
-function isImageFile(url: string): boolean {
-    const lower = url.toLowerCase();
-    return lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.png') || lower.endsWith('.gif') || lower.endsWith('.webp');
-}
-
-function splitMessage(text: string, limit: number): string[] {
-    if (text.length <= limit) return [text];
-    const chunks = [];
-    let current = text;
-    while (current.length > 0) {
-        chunks.push(current.slice(0, limit));
-        current = current.slice(limit);
-    }
-    return chunks;
-}
-
-function stripMarkdown(text: string): string {
-    return text
-        .replace(/\*\*(.*?)\*\*/g, "$1") // Bold
-        .replace(/\*(.*?)\*/g, "$1")     // Italic
-        .replace(/`(.*?)`/g, "$1")       // Inline code
-        .replace(/#+\s+(.*)/g, "$1")     // Headers
-        .replace(/\[(.*?)\]\(.*?\)/g, "$1") // Links
-        .replace(/^\s*>\s+(.*)/gm, "▎$1") // Blockquotes
-        .replace(/```[\s\S]*?```/g, "[代码块]") // Code blocks
-        .replace(/^\|.*\|$/gm, (match) => { // Simple table row approximation
-             return match.replace(/\|/g, " ").trim();
-        })
-        .replace(/^[\-\*]\s+/gm, "• "); // Lists
-}
-
-function processAntiRisk(text: string): string {
-    return text.replace(/(https?:\/\/)/gi, "$1 ");
-}
-
-async function resolveMediaUrl(url: string): Promise<string> {
-    if (url.startsWith("file:")) {
-        try {
-            const path = fileURLToPath(url);
-            const data = await fs.readFile(path);
-            const base64 = data.toString("base64");
-            return `base64://${base64}`;
-        } catch (e) {
-            console.warn(`[QQ] Failed to convert local file to base64: ${e}`);
-            return url; // Fallback to original
-        }
-    }
-    return url;
 }
 
 export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
@@ -757,7 +651,19 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
         const { account, cfg } = ctx;
         const config = account.config;
 
-        if (!config.wsUrl) throw new Error("QQ: wsUrl is required");
+        const connectionConfig = resolveConnectionConfig(config);
+
+        installGlobalInterceptor(config.logBufferSize ?? 200);
+        initRefIndexStore();
+        registerClientsMap(clientsMap);
+
+        if (config.enableUpdateCheck !== false) {
+            triggerUpdateCheck({
+                info: console.log,
+                error: console.error,
+                debug: console.debug,
+            });
+        }
 
         const existingClient = getQQClient(account.accountId);
         if (existingClient) {
@@ -766,15 +672,31 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
         }
 
         const client = new OneBotClient({
-            wsUrl: config.wsUrl,
+            wsUrl: connectionConfig.wsUrl,
+            httpUrl: config.httpUrl,
             accessToken: config.accessToken,
+            reverseWsPort: connectionConfig.reverseWsPort,
         });
         
         registerQQClient(account.accountId, client);
+        clientsMap.set(account.accountId, client);
 
+        const uploadCache = new UploadCache();
         const processedMsgIds = new Set<string>();
+        const inboundRateLimitMap = new Map<string, number>();
+        
         const cleanupInterval = setInterval(() => {
-            if (processedMsgIds.size > 1000) processedMsgIds.clear();
+            if (processedMsgIds.size > 1000) {
+                const arr = Array.from(processedMsgIds);
+                processedMsgIds.clear();
+                for (let i = arr.length - 500; i < arr.length; i++) {
+                    if (arr[i]) processedMsgIds.add(arr[i]);
+                }
+            }
+            const now = Date.now();
+            for (const [key, time] of inboundRateLimitMap) {
+                if (now - time > 60000) inboundRateLimitMap.delete(key);
+            }
         }, 3600000);
         
         // 生成唯一消息ID的函数
@@ -872,6 +794,27 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
             const groupId = event.group_id;
             const guildId = event.guild_id;
             const channelId = event.channel_id;
+            
+            if (config.silentKeywords && config.silentKeywords.length > 0) {
+                const rawMsg = event.raw_message || "";
+                for (const kw of config.silentKeywords) {
+                    if (rawMsg.includes(kw)) {
+                        console.log(`[QQ] 静默关键词命中，跳过消息: ${kw}`);
+                        return;
+                    }
+                }
+            }
+            
+            if (config.inboundRateLimitMs && config.inboundRateLimitMs > 0) {
+                const rateKey = isGroup ? `g:${groupId}:${userId}` : `p:${userId}`;
+                const lastTime = inboundRateLimitMap.get(rateKey) || 0;
+                const now = Date.now();
+                if (now - lastTime < config.inboundRateLimitMs) {
+                    console.log(`[QQ] 入站频控限制，跳过消息: ${rateKey}`);
+                    return;
+                }
+                inboundRateLimitMap.set(rateKey, now);
+            }
             
             let text = event.raw_message || "";
             
@@ -1014,6 +957,27 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
 
             const senderName = event.sender?.nickname || String(userId);
             botContext.recordInteraction(userId, senderName, groupId);
+            
+            recordKnownUser({
+                openid: String(userId),
+                type: isGroup ? "group" : "private",
+                nickname: senderName,
+                groupId: isGroup ? groupId : undefined,
+                accountId: account.accountId,
+            });
+            
+            if (isGroup && config.autoMarkRead) {
+                client.markGroupMsgAsRead(groupId);
+            }
+            
+            if (isGroup && config.reactionEmoji && event.message_id) {
+                try {
+                    client.setGroupReaction(groupId, String(event.message_id), config.reactionEmoji);
+                    console.log(`[QQ] 已回应表情: ${config.reactionEmoji}`);
+                } catch (e) {
+                    console.warn(`[QQ] 表情回应失败:`, e);
+                }
+            }
 
             const processedContext = botContext.processMessage(text, userId, groupId);
             const emotionInfo = processedContext.emotion;

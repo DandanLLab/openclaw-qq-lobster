@@ -1,10 +1,13 @@
 import WebSocket from "ws";
+import http from "node:http";
 import EventEmitter from "events";
-import type { OneBotEvent, OneBotMessage, OneBotMessageSegment, ImageMessageOptions, EmojiMessageOptions } from "./types.js";
+import type { OneBotEvent, OneBotMessage, OneBotMessageSegment } from "./types.js";
 
 interface OneBotClientOptions {
-  wsUrl: string;
+  wsUrl?: string;
+  httpUrl?: string;
   accessToken?: string;
+  reverseWsPort?: number;
 }
 
 class QQClientManager {
@@ -25,9 +28,7 @@ class QQClientManager {
 
 const clientManager = new QQClientManager();
 
-export function initQQClientManager(): void {
-  // 初始化时不需要做什么，管理器是单例
-}
+export function initQQClientManager(): void {}
 
 export function getQQClient(accountId: string): OneBotClient | undefined {
   return clientManager.getClient(accountId);
@@ -43,6 +44,7 @@ export function unregisterQQClient(accountId: string): void {
 
 export class OneBotClient extends EventEmitter {
   private ws: WebSocket | null = null;
+  private reverseWsServer: http.Server | null = null;
   private options: OneBotClientOptions;
   private reconnectAttempts = 0;
   private maxReconnectDelay = 60000;
@@ -72,7 +74,7 @@ export class OneBotClient extends EventEmitter {
 
   async waitForConnection(timeoutMs: number = 5000): Promise<boolean> {
     if (this.isConnected()) return true;
-    
+
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         resolve(false);
@@ -90,9 +92,9 @@ export class OneBotClient extends EventEmitter {
 
   private flushMessageQueue() {
     if (this.messageQueue.length === 0) return;
-    
+
     console.log(`[QQ] 📤 刷新消息队列，共 ${this.messageQueue.length} 条消息`);
-    
+
     while (this.messageQueue.length > 0 && this.isConnected()) {
       const msg = this.messageQueue.shift();
       if (msg) {
@@ -102,6 +104,20 @@ export class OneBotClient extends EventEmitter {
   }
 
   connect() {
+    if (this.options.reverseWsPort) {
+      this.startReverseWsServer(this.options.reverseWsPort);
+      return;
+    }
+
+    if (!this.options.wsUrl) {
+      console.error("[QQ] Neither wsUrl nor reverseWsPort is configured");
+      return;
+    }
+
+    this.connectForwardWs(this.options.wsUrl);
+  }
+
+  private connectForwardWs(wsUrl: string) {
     this.cleanup();
 
     const headers: Record<string, string> = {};
@@ -109,16 +125,16 @@ export class OneBotClient extends EventEmitter {
       headers["Authorization"] = `Bearer ${this.options.accessToken}`;
     }
 
-    console.log(`[QQ] 正在连接到 WebSocket 服务器: ${this.options.wsUrl}`);
-    
+    console.log(`[QQ] 正在连接到 WebSocket 服务器: ${wsUrl}`);
+
     try {
-      this.ws = new WebSocket(this.options.wsUrl, { headers });
+      this.ws = new WebSocket(wsUrl, { headers });
 
       this.ws.on("open", () => {
         this.isAlive = true;
         this.reconnectAttempts = 0;
         this.emit("connect");
-        console.log(`[QQ] ✅ WebSocket 连接成功: ${this.options.wsUrl}`);
+        console.log(`[QQ] ✅ WebSocket 连接成功: ${wsUrl}`);
         console.log(`[QQ] WebSocket readyState: OPEN (${WebSocket.OPEN})`);
         this.startHeartbeat();
         this.flushMessageQueue();
@@ -132,9 +148,7 @@ export class OneBotClient extends EventEmitter {
             return;
           }
           this.emit("message", payload);
-        } catch (err) {
-          // Ignore non-JSON or parse errors
-        }
+        } catch (err) {}
       });
 
       this.ws.on("close", (code, reason) => {
@@ -152,6 +166,71 @@ export class OneBotClient extends EventEmitter {
     }
   }
 
+  private startReverseWsServer(port: number) {
+    if (this.reverseWsServer) {
+      console.log(`[QQ] 反向 WebSocket 服务器已在运行`);
+      return;
+    }
+
+    this.reverseWsServer = http.createServer((req, res) => {
+      res.writeHead(404).end();
+    });
+
+    const wss = new WebSocket.Server({ server: this.reverseWsServer });
+
+    wss.on("connection", (ws, req) => {
+      console.log(`[QQ] 🔄 NapCat 已连接到反向 WebSocket 服务器`);
+
+      if (this.options.accessToken) {
+        const auth = req.headers["authorization"];
+        if (auth !== `Bearer ${this.options.accessToken}`) {
+          console.warn(`[QQ] ⚠️ 反向 WebSocket 认证失败`);
+          ws.close(1008, "Unauthorized");
+          return;
+        }
+      }
+
+      this.ws = ws;
+      this.isAlive = true;
+      this.reconnectAttempts = 0;
+      this.emit("connect");
+
+      ws.on("message", (data) => {
+        this.isAlive = true;
+        try {
+          const payload = JSON.parse(data.toString()) as OneBotEvent;
+          if (payload.post_type === "meta_event" && payload.meta_event_type === "heartbeat") {
+            return;
+          }
+          this.emit("message", payload);
+        } catch (err) {}
+      });
+
+      ws.on("close", () => {
+        console.warn(`[QQ] 反向 WebSocket 连接关闭`);
+        this.ws = null;
+        this.emit("disconnect");
+      });
+
+      ws.on("error", (err) => {
+        console.error(`[QQ] 反向 WebSocket 错误: ${err.message}`);
+        this.ws = null;
+      });
+
+      this.startHeartbeat();
+      this.flushMessageQueue();
+    });
+
+    this.reverseWsServer.listen(port, () => {
+      console.log(`[QQ] ✅ 反向 WebSocket 服务器已启动，监听端口 ${port}`);
+      console.log(`[QQ] 请在 NapCat 中配置反向 WebSocket 地址: ws://127.0.0.1:${port}`);
+    });
+
+    this.reverseWsServer.on("error", (err) => {
+      console.error(`[QQ] 反向 WebSocket 服务器错误: ${err.message}`);
+    });
+  }
+
   private cleanup() {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -166,16 +245,12 @@ export class OneBotClient extends EventEmitter {
       this.ws = null;
       try {
         ws.removeAllListeners();
-      } catch {
-        // 忽略移除监听器的错误
-      }
+      } catch {}
       try {
         if (ws.readyState === WebSocket.OPEN) {
           ws.terminate();
         }
-      } catch {
-        // 忽略关闭错误
-      }
+      } catch {}
     }
   }
 
@@ -194,7 +269,9 @@ export class OneBotClient extends EventEmitter {
   private handleDisconnect() {
     this.cleanup();
     this.emit("disconnect");
-    this.scheduleReconnect();
+    if (!this.options.reverseWsPort) {
+      this.scheduleReconnect();
+    }
   }
 
   private scheduleReconnect() {
@@ -207,6 +284,39 @@ export class OneBotClient extends EventEmitter {
       this.reconnectAttempts++;
       this.connect();
     }, delay);
+  }
+
+  async sendAction(action: string, params: any): Promise<any> {
+    if (this.options.httpUrl) {
+      return this.sendHttp(action, params);
+    }
+    return this.sendWithResponse(action, params);
+  }
+
+  private async sendHttp(action: string, params: any): Promise<any> {
+    const url = `${this.options.httpUrl}/${action}`;
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (this.options.accessToken) {
+      headers["Authorization"] = `Bearer ${this.options.accessToken}`;
+    }
+
+    const resp = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(params),
+    });
+
+    if (!resp.ok) {
+      throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
+    }
+
+    const data = await resp.json();
+    if (data.status !== "ok") {
+      throw new Error(data.msg || "API request failed");
+    }
+    return data.data;
   }
 
   sendPrivateMsg(userId: number, message: OneBotMessage | string) {
@@ -359,6 +469,35 @@ export class OneBotClient extends EventEmitter {
     this.send("set_group_kick", { group_id: groupId, user_id: userId, reject_add_request: rejectAddRequest });
   }
 
+  setGroupReaction(groupId: number, messageId: string, code: string) {
+    this.send("set_group_reaction", { group_id: groupId, message_id: messageId, code });
+  }
+
+  markGroupMsgAsRead(groupId: number) {
+    this.send("mark_group_msg_as_read", { group_id: groupId });
+  }
+
+  async sendGroupAiRecord(groupId: number, voiceId: string, text: string): Promise<any> {
+    return this.sendWithResponse("send_group_ai_record", {
+      group_id: groupId,
+      voice_id: voiceId,
+      text,
+    });
+  }
+
+  async uploadPrivateFile(userId: number, file: string, name: string): Promise<any> {
+    return this.sendWithResponse("upload_private_file", { user_id: userId, file, name });
+  }
+
+  async uploadGroupFile(groupId: number, file: string, name: string, folder?: string): Promise<any> {
+    return this.sendWithResponse("upload_group_file", {
+      group_id: groupId,
+      file,
+      name,
+      folder: folder || "/",
+    });
+  }
+
   private sendWithResponse(action: string, params: any): Promise<any> {
     return new Promise((resolve, reject) => {
       if (this.ws?.readyState !== WebSocket.OPEN) {
@@ -378,9 +517,7 @@ export class OneBotClient extends EventEmitter {
               reject(new Error(resp.msg || "API request failed"));
             }
           }
-        } catch (err) {
-          // Ignore non-JSON messages
-        }
+        } catch (err) {}
       };
 
       this.ws.on("message", handler);
@@ -389,7 +526,7 @@ export class OneBotClient extends EventEmitter {
       setTimeout(() => {
         this.ws?.off("message", handler);
         reject(new Error("Request timeout"));
-      }, 5000);
+      }, 10000);
     });
   }
 
@@ -399,16 +536,16 @@ export class OneBotClient extends EventEmitter {
       console.log(`[QQ] 📤 已发送API请求: ${action}`);
     } else {
       const state = this.ws?.readyState;
-      const stateStr = state === WebSocket.CONNECTING ? "CONNECTING" : 
-                       state === WebSocket.CLOSING ? "CLOSING" : 
+      const stateStr = state === WebSocket.CONNECTING ? "CONNECTING" :
+                       state === WebSocket.CLOSING ? "CLOSING" :
                        state === WebSocket.CLOSED ? "CLOSED" : "NULL";
-      
+
       console.warn(`[QQ] ⚠️ WebSocket 未就绪 (state: ${stateStr}), 将消息加入队列`);
       console.warn(`[QQ] Action: ${action}`);
-      
+
       this.messageQueue.push({ action, params });
       console.log(`[QQ] 📝 消息队列长度: ${this.messageQueue.length}`);
-      
+
       if (state === WebSocket.CLOSED || state === WebSocket.CLOSING || !this.ws) {
         console.log(`[QQ] 🔄 触发重连...`);
         this.scheduleReconnect();
@@ -420,5 +557,9 @@ export class OneBotClient extends EventEmitter {
 
   disconnect() {
     this.cleanup();
+    if (this.reverseWsServer) {
+      this.reverseWsServer.close();
+      this.reverseWsServer = null;
+    }
   }
 }

@@ -7,6 +7,11 @@ import { getQQClient, initQQClientManager } from "./src/client.js";
 import { getEmojiManager } from "./src/core/emoji/emojiManager.js";
 import { getCurrentMessageContext } from "./src/messageContext.js";
 import { getPersonInfoManager } from "./src/core/person/personInfoManager.js";
+import { sendProactive, broadcastToKnownUsers, listKnownUsers, getKnownUsersStats } from "./src/proactive.js";
+import { runDiagnostics } from "./src/utils/platform.js";
+import { getPackageVersion } from "./src/utils/pkg-version.js";
+import { getRecentLogs } from "./src/log-buffer.js";
+import { getUpdateInfo } from "./src/update-checker.js";
 
 function registerQQTools(api: OpenClawPluginApi) {
   api.registerTool({
@@ -348,6 +353,97 @@ function registerQQTools(api: OpenClawPluginApi) {
         content: [{ type: "text", text: info }], 
         details: { success: true, context: ctx } 
       };
+    },
+  });
+
+  api.registerTool({
+    name: "qq_send_proactive",
+    label: "QQ主动发送消息",
+    description: "主动发送消息到指定用户或群组，无需等待用户触发。龙虾可以主动联系用户。",
+    parameters: Type.Object({
+      to: Type.String({ description: "目标ID，格式：私聊用QQ号，群聊用 group:群号" }),
+      text: Type.String({ description: "要发送的消息内容" }),
+    }),
+    async execute(_toolCallId, params) {
+      try {
+        const result = await sendProactive({ to: params.to, text: params.text });
+        return { 
+          content: [{ type: "text", text: result.success ? `消息已发送到 ${params.to}` : `发送失败: ${result.error}` }], 
+          details: { success: result.success, error: result.error } 
+        };
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `发送失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_broadcast",
+    label: "QQ广播消息",
+    description: "向所有已知用户或群组广播消息。龙虾可以群发通知。",
+    parameters: Type.Object({
+      text: Type.String({ description: "要广播的消息内容" }),
+      type: Type.Optional(Type.Union([Type.Literal("private"), Type.Literal("group")])),
+    }),
+    async execute(_toolCallId, params) {
+      try {
+        const result = await broadcastToKnownUsers(params.text, { type: params.type as any });
+        return { 
+          content: [{ type: "text", text: `广播完成: 成功 ${result.sent}，失败 ${result.failed}` }], 
+          details: { success: true, sent: result.sent, failed: result.failed } 
+        };
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `广播失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_get_known_users",
+    label: "QQ获取已知用户",
+    description: "获取已知用户列表统计信息。",
+    parameters: Type.Object({}),
+    async execute(_toolCallId, _params) {
+      try {
+        const stats = getKnownUsersStats();
+        return { 
+          content: [{ type: "text", text: `已知用户统计: 总计 ${stats.totalUsers} 人，私聊 ${stats.privateUsers}，群聊 ${stats.groupUsers}，24h活跃 ${stats.activeIn24h}` }], 
+          details: { success: true, stats } 
+        };
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `获取失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_diagnostics",
+    label: "QQ环境诊断",
+    description: "运行QQ插件环境诊断，检查ffmpeg、silk-wasm等依赖。",
+    parameters: Type.Object({}),
+    async execute(_toolCallId, _params) {
+      try {
+        const report = await runDiagnostics();
+        const summary = `平台: ${report.platform}\nNode: ${report.nodeVersion}\nffmpeg: ${report.ffmpeg ?? '未安装'}\nsilk-wasm: ${report.silkWasm ? '可用' : '不可用'}\n警告: ${report.warnings.length}`;
+        return { 
+          content: [{ type: "text", text: summary }], 
+          details: { success: true, report } 
+        };
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `诊断失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
     },
   });
 }
