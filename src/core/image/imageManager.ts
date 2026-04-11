@@ -10,7 +10,7 @@ import {
   type ModelCallOptions,
 } from "../modelCaller.js";
 
-const IMAGE_CACHE_DIR = path.join(os.homedir(), ".openclaw", "qq_image_cache");
+const IMAGE_CACHE_DIR = "D:\\OpenClaw\\.openclaw\\qq_image_cache";
 const DESCRIPTION_CACHE_FILE = path.join(IMAGE_CACHE_DIR, "image_descriptions.json");
 
 interface ImageDescriptionCache {
@@ -346,7 +346,7 @@ export async function processImage(
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 60000);
 
-            const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+            const response = await fetch(`${baseUrl}/chat/completions`, {
               method: "POST",
               headers: {
                 "Content-Type": "application/json",

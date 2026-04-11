@@ -56,11 +56,18 @@ export class MemoryRetrieval {
   private memoryStore: Map<string, MemoryRecord> = new Map();
   private embeddingCache: Map<string, number[]> = new Map();
   private maxMemories: number = 1000;
+  private diaryThreshold: number = 100;
+  private onDiaryNeeded?: (chatId: string, memories: MemoryRecord[]) => Promise<void>;
 
   constructor(chatId: string, config?: any) {
     this.chatId = chatId;
     this.config = config || {};
     this.maxMemories = config?.memory?.maxMemories || 1000;
+    this.diaryThreshold = config?.memory?.diaryThreshold || 100;
+  }
+
+  setOnDiaryNeeded(callback: (chatId: string, memories: MemoryRecord[]) => Promise<void>): void {
+    this.onDiaryNeeded = callback;
   }
 
   async buildMemoryInfo(target: string): Promise<string> {
@@ -159,7 +166,7 @@ export class MemoryRetrieval {
     this.memoryStore.set(id, record);
 
     if (this.memoryStore.size > this.maxMemories) {
-      this.pruneMemories();
+      await this.pruneMemories();
     }
 
     console.log(`[MemoryRetrieval] 添加记忆: ${record.summary || content.substring(0, 30)}...`);
@@ -197,8 +204,19 @@ export class MemoryRetrieval {
     };
   }
 
-  private pruneMemories(): void {
+  private async pruneMemories(): Promise<void> {
     const allMemories = Array.from(this.memoryStore.values());
+
+    if (allMemories.length >= this.diaryThreshold && this.onDiaryNeeded) {
+      const oldMemories = allMemories
+        .sort((a, b) => a.timestamp - b.timestamp)
+        .slice(0, Math.floor(this.diaryThreshold * 0.5));
+      
+      if (oldMemories.length > 0) {
+        console.log(`[MemoryRetrieval] 📝 记忆已满${allMemories.length}条，触发日记生成...`);
+        await this.onDiaryNeeded(this.chatId, oldMemories);
+      }
+    }
 
     allMemories.sort((a, b) => {
       const scoreA = a.importance * 0.3 + a.accessCount * 0.5 - (Date.now() - a.timestamp) / 1000000;

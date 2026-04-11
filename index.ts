@@ -6,6 +6,7 @@ import { setQQRuntime } from "./src/runtime.js";
 import { getQQClient, initQQClientManager } from "./src/client.js";
 import { getEmojiManager } from "./src/core/emoji/emojiManager.js";
 import { getCurrentMessageContext } from "./src/messageContext.js";
+import { getPersonInfoManager } from "./src/core/person/personInfoManager.js";
 
 function registerQQTools(api: OpenClawPluginApi) {
   api.registerTool({
@@ -364,6 +365,10 @@ const plugin = {
     emojiManager.initialize().catch(err => {
       console.error("[QQ] EmojiManager initialization failed:", err);
     });
+    
+    const personInfoManager = getPersonInfoManager();
+    personInfoManager.startIntimacyDecayTimer();
+    console.log("[QQ] PersonInfoManager initialized with intimacy decay timer");
     
     api.registerChannel({ plugin: qqChannel });
     registerQQTools(api);

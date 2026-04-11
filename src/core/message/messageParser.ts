@@ -436,7 +436,7 @@ export class MessageParser {
 
       const baseUrl = provider.baseUrl || provider.baseURL;
 
-      const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+      const response = await fetch(`${baseUrl}/chat/completions`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

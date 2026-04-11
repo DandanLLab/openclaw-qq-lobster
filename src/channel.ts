@@ -67,8 +67,9 @@ class QQBotContext {
     if (this.initialized) return;
     await initializeImageManager();
     await pluginManager.initialize({});
+    this.personManager.startIntimacyDecayTimer();
     this.initialized = true;
-    console.log("[QQBotContext] 所有模块初始化完成");
+    console.log("[QQBotContext] 所有模块初始化完成，亲密度衰减定时器已启动");
   }
 
   getPersonManager() { return this.personManager; }

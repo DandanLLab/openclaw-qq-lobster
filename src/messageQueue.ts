@@ -8,12 +8,15 @@ interface QueuedMessage {
   isMentioned: boolean;
   event: any;
   priority: number;
+  messageHash?: string;
 }
 
 interface ChatQueueState {
   messages: QueuedMessage[];
   processing: boolean;
   currentAbortController?: AbortController;
+  summary?: string;
+  summaryTimestamp?: number;
 }
 
 interface UserConversationRecord {
@@ -37,6 +40,9 @@ class MessageQueueManager {
   private maxQueueSize: number = 10;
   private messageTimeout: number = 60000;
   private conversationTimeout: number = 300000;
+  private maxContextSize: number = 20;
+  private summaryThreshold: number = 15;
+  private messageHashCache: Map<string, number> = new Map();
 
   private constructor() {}
 
@@ -45,6 +51,40 @@ class MessageQueueManager {
       MessageQueueManager.instance = new MessageQueueManager();
     }
     return MessageQueueManager.instance;
+  }
+
+  private generateMessageHash(msg: Omit<QueuedMessage, 'priority' | 'messageHash'>): string {
+    const content = `${msg.userId}:${msg.text.substring(0, 100)}`;
+    let hash = 0;
+    for (let i = 0; i < content.length; i++) {
+      const char = content.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash;
+    }
+    return `${hash}_${msg.timestamp}`;
+  }
+
+  private isDuplicateMessage(chatId: string, msg: Omit<QueuedMessage, 'priority' | 'messageHash'>): boolean {
+    const hash = this.generateMessageHash(msg);
+    const now = Date.now();
+    const lastTime = this.messageHashCache.get(`${chatId}:${hash}`);
+    
+    if (lastTime && (now - lastTime) < 5000) {
+      console.log(`[MessageQueue] 🔄 检测到重复消息，跳过: ${msg.text.substring(0, 30)}...`);
+      return true;
+    }
+    
+    this.messageHashCache.set(`${chatId}:${hash}`, now);
+    
+    if (this.messageHashCache.size > 10000) {
+      const entriesToDelete: string[] = [];
+      this.messageHashCache.forEach((time, key) => {
+        if (now - time > 60000) entriesToDelete.push(key);
+      });
+      entriesToDelete.forEach(key => this.messageHashCache.delete(key));
+    }
+    
+    return false;
   }
 
   private getOrCreateConversationState(chatId: string): ChatConversationState {
@@ -178,10 +218,12 @@ class MessageQueueManager {
     usersToDelete.forEach(userId => state.recentUsers.delete(userId));
   }
 
-  enqueue(chatId: string, msg: Omit<QueuedMessage, 'priority'>): {
+  enqueue(chatId: string, msg: Omit<QueuedMessage, 'priority' | 'messageHash'>): {
     shouldProcess: boolean;
     cancelledMessages: QueuedMessage[];
     contextMessages: QueuedMessage[];
+    needsSummary: boolean;
+    summary?: string;
   } {
     let state = this.queues.get(chatId);
     if (!state) {
@@ -190,10 +232,25 @@ class MessageQueueManager {
     }
 
     this.cleanOldMessages(state);
+    
+    if (this.isDuplicateMessage(chatId, msg)) {
+      console.log(`[MessageQueue] ⏭️ 重复消息已去重: ${msg.text.substring(0, 30)}...`);
+      return {
+        shouldProcess: false,
+        cancelledMessages: [],
+        contextMessages: state.messages,
+        needsSummary: false
+      };
+    }
+
     this.recordUserMessage(chatId, msg.userId);
 
     const priority = msg.isMentioned ? 100 : 0;
-    const queuedMsg: QueuedMessage = { ...msg, priority };
+    const queuedMsg: QueuedMessage = { 
+      ...msg, 
+      priority,
+      messageHash: this.generateMessageHash(msg)
+    };
 
     if (msg.isMentioned && state.processing) {
       if (state.currentAbortController) {
@@ -208,12 +265,18 @@ class MessageQueueManager {
       return {
         shouldProcess: true,
         cancelledMessages,
-        contextMessages: cancelledMessages
+        contextMessages: cancelledMessages,
+        needsSummary: false
       };
     }
 
     if (state.messages.length >= this.maxQueueSize) {
-      state.messages.shift();
+      const summary = this.generateContextSummary(state.messages);
+      state.summary = summary;
+      state.summaryTimestamp = Date.now();
+      console.log(`[MessageQueue] 📝 上下文已满，自动生成总结: ${summary.substring(0, 50)}...`);
+      
+      state.messages = state.messages.slice(-3);
     }
 
     state.messages.push(queuedMsg);
@@ -222,15 +285,57 @@ class MessageQueueManager {
       return {
         shouldProcess: true,
         cancelledMessages: [],
-        contextMessages: state.messages.slice(0, -1)
+        contextMessages: state.messages.slice(0, -1),
+        needsSummary: !!state.summary,
+        summary: state.summary
       };
     }
 
     return {
       shouldProcess: false,
       cancelledMessages: [],
-      contextMessages: state.messages.slice(0, -1)
+      contextMessages: state.messages.slice(0, -1),
+      needsSummary: false
     };
+  }
+
+  private generateContextSummary(messages: QueuedMessage[]): string {
+    if (messages.length === 0) return '';
+    
+    const participants = new Set(messages.map(m => m.senderName));
+    const topics = this.extractTopics(messages.map(m => m.text).join(' '));
+    
+    const recentMessages = messages.slice(-5).map(m => 
+      `${m.senderName}: ${m.text.substring(0, 50)}${m.text.length > 50 ? '...' : ''}`
+    ).join('\n');
+    
+    return `📊 上下文总结\n参与: ${participants.size}人 | 话题: ${topics.slice(0, 3).join('、')}\n\n最近:\n${recentMessages}`;
+  }
+
+  private extractTopics(text: string): string[] {
+    const topics: string[] = [];
+    const stopWords = new Set(['的', '了', '是', '在', '我', '你', '他', '她', '它', '这', '那', '有', '和', '就', '不', '都', '很', '也', '要', '会', '能', '到', '说', '去', '来', '看', '啊', '吧', '呢', '吗', '哦', '哈', '嗯', '呀']);
+    
+    const words = text.split(/\s+/).flatMap(w => {
+      const result: string[] = [];
+      for (let i = 0; i < w.length - 1; i++) {
+        const bigram = w.substring(i, i + 2);
+        if (!stopWords.has(bigram) && !/^\d+$/.test(bigram)) {
+          result.push(bigram);
+        }
+      }
+      return result;
+    });
+    
+    const freq = new Map<string, number>();
+    for (const word of words) {
+      freq.set(word, (freq.get(word) || 0) + 1);
+    }
+    
+    return Array.from(freq.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([word]) => word);
   }
 
   startProcessing(chatId: string): AbortController | null {
