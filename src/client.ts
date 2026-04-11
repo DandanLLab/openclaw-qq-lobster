@@ -176,24 +176,40 @@ export class OneBotClient extends EventEmitter {
       res.writeHead(404).end();
     });
 
-    const wss = new WebSocketServer({ server: this.reverseWsServer });
+    const wss = new WebSocketServer({ 
+      server: this.reverseWsServer,
+      clientTracking: true,
+      perMessageDeflate: false,
+    });
 
     wss.on("connection", (ws, req) => {
-      console.log(`[QQ] 🔄 NapCat 已连接到反向 WebSocket 服务器`);
+      const clientIp = req.socket.remoteAddress || "unknown";
+      console.log(`[QQ] 🔄 NapCat 已连接到反向 WebSocket 服务器 (IP: ${clientIp})`);
 
       if (this.options.accessToken) {
         const auth = req.headers["authorization"];
         if (auth !== `Bearer ${this.options.accessToken}`) {
-          console.warn(`[QQ] ⚠️ 反向 WebSocket 认证失败`);
+          console.warn(`[QQ] ⚠️ 反向 WebSocket 认证失败，来自 ${clientIp}`);
           ws.close(1008, "Unauthorized");
           return;
         }
+      }
+
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        console.warn(`[QQ] ⚠️ 已有活跃连接，关闭旧连接`);
+        try {
+          this.ws.close(1000, "New connection established");
+        } catch {}
       }
 
       this.ws = ws;
       this.isAlive = true;
       this.reconnectAttempts = 0;
       this.emit("connect");
+
+      ws.on("pong", () => {
+        this.isAlive = true;
+      });
 
       ws.on("message", (data) => {
         this.isAlive = true;
@@ -203,32 +219,80 @@ export class OneBotClient extends EventEmitter {
             return;
           }
           this.emit("message", payload);
-        } catch (err) {}
+        } catch (err) {
+          console.warn(`[QQ] 解析消息失败: ${err}`);
+        }
       });
 
-      ws.on("close", () => {
-        console.warn(`[QQ] 反向 WebSocket 连接关闭`);
+      ws.on("close", (code, reason) => {
+        console.warn(`[QQ] 反向 WebSocket 连接关闭: code=${code}, reason=${reason.toString() || "无"}`);
         this.ws = null;
+        this.isAlive = false;
+        if (this.heartbeatTimer) {
+          clearInterval(this.heartbeatTimer);
+          this.heartbeatTimer = null;
+        }
         this.emit("disconnect");
+        console.log(`[QQ] 🔄 等待 NapCat 重新连接...`);
       });
 
       ws.on("error", (err) => {
         console.error(`[QQ] 反向 WebSocket 错误: ${err.message}`);
         this.ws = null;
+        this.isAlive = false;
       });
 
-      this.startHeartbeat();
+      this.startReverseHeartbeat();
       this.flushMessageQueue();
     });
 
-    this.reverseWsServer.listen(port, () => {
-      console.log(`[QQ] ✅ 反向 WebSocket 服务器已启动，监听端口 ${port}`);
-      console.log(`[QQ] 请在 NapCat 中配置反向 WebSocket 地址: ws://127.0.0.1:${port}`);
+    wss.on("error", (err) => {
+      console.error(`[QQ] WebSocketServer 错误: ${err.message}`);
     });
 
     this.reverseWsServer.on("error", (err) => {
       console.error(`[QQ] 反向 WebSocket 服务器错误: ${err.message}`);
+      if ((err as any).code === "EADDRINUSE") {
+        console.error(`[QQ] 端口 ${port} 已被占用，请检查是否有其他程序占用`);
+      }
     });
+
+    this.reverseWsServer.listen(port, "0.0.0.0", () => {
+      console.log(`[QQ] ✅ 反向 WebSocket 服务器已启动，监听端口 ${port} (0.0.0.0)`);
+      console.log(`[QQ] 请在 NapCat 中配置反向 WebSocket 地址: ws://127.0.0.1:${port}`);
+      console.log(`[QQ] 或使用本机IP: ws://<本机IP>:${port}`);
+    });
+  }
+
+  private startReverseHeartbeat() {
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    
+    this.heartbeatTimer = setInterval(() => {
+      if (!this.ws) {
+        return;
+      }
+      
+      if (this.isAlive === false) {
+        console.warn("[QQ] 反向连接心跳超时，等待 NapCat 重连...");
+        if (this.ws.readyState === WebSocket.OPEN) {
+          try {
+            this.ws.terminate();
+          } catch {}
+        }
+        this.ws = null;
+        this.isAlive = false;
+        return;
+      }
+      
+      this.isAlive = false;
+      if (this.ws.readyState === WebSocket.OPEN) {
+        try {
+          this.ws.ping();
+        } catch (err) {
+          console.warn(`[QQ] 发送 ping 失败: ${err}`);
+        }
+      }
+    }, 30000);
   }
 
   private cleanup() {

@@ -47,663 +47,7 @@ function registerQQTools(api: OpenClawPluginApi) {
         await client.setGroupBan(ctx.groupId!, targetUserId, duration);
         return { 
           content: [{ type: "text", text: `已将用户 ${targetUserId} 在群 ${ctx.groupId} 禁言 ${duration} 秒` }], 
-          details: { success: true, group_id: ctx.groupId, user_id: targetUserId, duration } 
-        };
-      } catch (e: any) {
-        return { 
-          content: [{ type: "text", text: `禁言失败: ${e.message}` }], 
-          details: { success: false, error: e.message } 
-        };
-      }
-    },
-  });
-
-  api.registerTool({
-    name: "qq_group_kick",
-    label: "QQ群踢人",
-    description: "将指定用户踢出QQ群。此操作需要管理员确认后才会执行。只有在主群才能使用此功能。如果不指定user_id，则踢出当前对话的用户。",
-    parameters: Type.Object({
-      user_id: Type.Optional(Type.Number({ description: "要踢出的用户ID（不填则踢出当前用户）" })),
-      reason: Type.Optional(Type.String({ description: "踢人原因" })),
-    }),
-    async execute(_toolCallId, params) {
-      const ctx = getCurrentMessageContext();
-      if (!ctx || !ctx.isGroup) {
-        return { content: [{ type: "text", text: "当前不在群聊环境中，无法踢人" }], details: { success: false } };
-      }
-      
-      if (!ctx.isPrimary) {
-        return { content: [{ type: "text", text: "⚠️ 权限不足：踢人功能仅在主群可用" }], details: { success: false, reason: "not_primary_group" } };
-      }
-      
-      const targetUserId = params.user_id || ctx.userId;
-      
-      return { 
-        content: [{ 
-          type: "text", 
-          text: `【需要管理员确认】请求将用户 ${targetUserId} 踢出群 ${ctx.groupId}。原因: ${params.reason || '未提供'}。请管理员确认后执行。` 
-        }], 
-        details: { success: false, needsApproval: true, group_id: ctx.groupId, user_id: targetUserId, reason: params.reason } 
-      };
-    },
-  });
-
-  api.registerTool({
-    name: "qq_send_poke",
-    label: "QQ戳一戳",
-    description: "戳一戳指定用户。如果不指定user_id，则戳当前对话的用户。龙虾可以自行决定是否戳回去。",
-    parameters: Type.Object({
-      user_id: Type.Optional(Type.Number({ description: "要戳的用户ID（不填则戳当前用户）" })),
-    }),
-    async execute(_toolCallId, params) {
-      const client = getQQClient("default");
-      if (!client) {
-        return { content: [{ type: "text", text: "QQ客户端未连接" }], details: { success: false } };
-      }
-      
-      const ctx = getCurrentMessageContext();
-      if (!ctx || !ctx.isGroup) {
-        return { content: [{ type: "text", text: "当前不在群聊环境中，无法戳一戳" }], details: { success: false } };
-      }
-      
-      const targetUserId = params.user_id || ctx.userId;
-      
-      try {
-        await client.sendGroupPoke(ctx.groupId!, targetUserId);
-        return { 
-          content: [{ type: "text", text: `已戳一戳用户 ${targetUserId}` }], 
-          details: { success: true, group_id: ctx.groupId, user_id: targetUserId } 
-        };
-      } catch (e: any) {
-        return { 
-          content: [{ type: "text", text: `戳一戳失败: ${e.message}` }], 
-          details: { success: false, error: e.message } 
-        };
-      }
-    },
-  });
-
-  api.registerTool({
-    name: "qq_send_emoji",
-    label: "QQ发送表情包",
-    description: "发送表情包到当前群聊。龙虾可以自行决定是否发送表情包。",
-    parameters: Type.Object({
-      emoji_path: Type.String({ description: "表情包文件路径" }),
-    }),
-    async execute(_toolCallId, params) {
-      const client = getQQClient("default");
-      if (!client) {
-        return { content: [{ type: "text", text: "QQ客户端未连接" }], details: { success: false } };
-      }
-      
-      const ctx = getCurrentMessageContext();
-      if (!ctx || !ctx.isGroup) {
-        return { content: [{ type: "text", text: "当前不在群聊环境中，无法发送表情包" }], details: { success: false } };
-      }
-      
-      try {
-        const fs = await import("fs");
-        const imageBuffer = fs.readFileSync(params.emoji_path);
-        const base64 = imageBuffer.toString("base64");
-        await client.sendEmojiToGroup(ctx.groupId!, base64);
-        return { 
-          content: [{ type: "text", text: `已发送表情包` }], 
-          details: { success: true, group_id: ctx.groupId, emoji_path: params.emoji_path } 
-        };
-      } catch (e: any) {
-        return { 
-          content: [{ type: "text", text: `发送表情包失败: ${e.message}` }], 
-          details: { success: false, error: e.message } 
-        };
-      }
-    },
-  });
-
-  api.registerTool({
-    name: "qq_send_emoji_by_emotion",
-    label: "QQ根据情感发送表情包",
-    description: "根据情感描述自动选择并发送表情包到当前群聊。龙虾可以根据当前对话的情感氛围选择合适的表情包。",
-    parameters: Type.Object({
-      emotion: Type.String({ description: "情感描述，如：开心、无奈、嘲讽、疑惑、惊讶等" }),
-    }),
-    async execute(_toolCallId, params) {
-      const client = getQQClient("default");
-      if (!client) {
-        return { content: [{ type: "text", text: "QQ客户端未连接" }], details: { success: false } };
-      }
-      
-      const ctx = getCurrentMessageContext();
-      if (!ctx || !ctx.isGroup) {
-        return { content: [{ type: "text", text: "当前不在群聊环境中，无法发送表情包" }], details: { success: false } };
-      }
-      
-      try {
-        const emojiManager = getEmojiManager();
-        const emoji = await emojiManager.getEmojiForText(params.emotion);
-        
-        if (!emoji) {
-          return { 
-            content: [{ type: "text", text: `没有找到匹配"${params.emotion}"情感的表情包` }], 
-            details: { success: false, emotion: params.emotion } 
-          };
-        }
-
-        const fs = await import("fs");
-        const imageBuffer = fs.readFileSync(emoji.path);
-        const base64 = imageBuffer.toString("base64");
-        await client.sendEmojiToGroup(ctx.groupId!, base64);
-        
-        return { 
-          content: [{ type: "text", text: `已发送表情包：${emoji.description}` }], 
-          details: { success: true, group_id: ctx.groupId, emotion: params.emotion, emoji_description: emoji.description } 
-        };
-      } catch (e: any) {
-        return { 
-          content: [{ type: "text", text: `发送表情包失败: ${e.message}` }], 
-          details: { success: false, error: e.message } 
-        };
-      }
-    },
-  });
-
-  api.registerTool({
-    name: "qq_list_emojis",
-    label: "QQ列出表情包",
-    description: "列出当前可用的表情包及其描述。龙虾可以查看有哪些表情包可以使用。",
-    parameters: Type.Object({
-      count: Type.Optional(Type.Number({ description: "返回数量，默认10个", default: 10 })),
-    }),
-    async execute(_toolCallId, params) {
-      try {
-        const emojiManager = getEmojiManager();
-        const emojis = await emojiManager.getRandom(params.count || 10);
-        
-        if (emojis.length === 0) {
-          return { 
-            content: [{ type: "text", text: "当前没有可用的表情包" }], 
-            details: { success: true, emojis: [] } 
-          };
-        }
-
-        const emojiList = emojis.map((e, i) => `${i + 1}. ${e.description} (情感: ${e.emotion})`).join("\n");
-        return { 
-          content: [{ type: "text", text: `当前可用表情包:\n${emojiList}` }], 
-          details: { success: true, count: emojis.length, emojis } 
-        };
-      } catch (e: any) {
-        return { 
-          content: [{ type: "text", text: `获取表情包列表失败: ${e.message}` }], 
-          details: { success: false, error: e.message } 
-        };
-      }
-    },
-  });
-
-  api.registerTool({
-    name: "qq_get_emoji_stats",
-    label: "QQ表情包统计",
-    description: "获取表情包存储统计信息。",
-    parameters: Type.Object({}),
-    async execute(_toolCallId, _params) {
-      try {
-        const emojiManager = getEmojiManager();
-        const stats = emojiManager.getStats();
-        return { 
-          content: [{ type: "text", text: `表情包统计: ${stats.total}/${stats.max} 个` }], 
-          details: { success: true, stats } 
-        };
-      } catch (e: any) {
-        return { 
-          content: [{ type: "text", text: `获取统计失败: ${e.message}` }], 
-          details: { success: false, error: e.message } 
-        };
-      }
-    },
-  });
-
-  api.registerTool({
-    name: "qq_send_image",
-    label: "QQ发送图片",
-    description: "发送图片到当前群聊或私聊。龙虾可以自行决定是否发送图片。",
-    parameters: Type.Object({
-      image_url: Type.String({ description: "图片URL或本地路径" }),
-    }),
-    async execute(_toolCallId, params) {
-      const client = getQQClient("default");
-      if (!client) {
-        return { content: [{ type: "text", text: "QQ客户端未连接" }], details: { success: false } };
-      }
-      
-      const ctx = getCurrentMessageContext();
-      if (!ctx) {
-        return { content: [{ type: "text", text: "无法获取当前消息上下文" }], details: { success: false } };
-      }
-      
-      try {
-        if (ctx.isGroup) {
-          await client.sendImageUrlToGroup(ctx.groupId!, params.image_url);
-        } else {
-          await client.sendImageUrlToPrivate(ctx.userId, params.image_url);
-        }
-        return { 
-          content: [{ type: "text", text: `已发送图片` }], 
-          details: { success: true, image_url: params.image_url } 
-        };
-      } catch (e: any) {
-        return { 
-          content: [{ type: "text", text: `发送图片失败: ${e.message}` }], 
-          details: { success: false, error: e.message } 
-        };
-      }
-    },
-  });
-
-  api.registerTool({
-    name: "qq_send_file",
-    label: "QQ发送文件",
-    description: "发送文件到当前群聊。龙虾可以自行决定是否发送文件。",
-    parameters: Type.Object({
-      file_url: Type.String({ description: "文件URL或本地路径" }),
-      file_name: Type.Optional(Type.String({ description: "文件名" })),
-    }),
-    async execute(_toolCallId, params) {
-      const client = getQQClient("default");
-      if (!client) {
-        return { content: [{ type: "text", text: "QQ客户端未连接" }], details: { success: false } };
-      }
-      
-      const ctx = getCurrentMessageContext();
-      if (!ctx || !ctx.isGroup) {
-        return { content: [{ type: "text", text: "当前不在群聊环境中，无法发送文件" }], details: { success: false } };
-      }
-      
-      try {
-        const fileName = params.file_name || params.file_url.split("/").pop() || "file";
-        const message = `[CQ:file,file=${params.file_url},name=${fileName}]`;
-        await client.sendGroupMsg(ctx.groupId!, message);
-        return { 
-          content: [{ type: "text", text: `已发送文件: ${fileName}` }], 
-          details: { success: true, group_id: ctx.groupId, file_url: params.file_url } 
-        };
-      } catch (e: any) {
-        return { 
-          content: [{ type: "text", text: `发送文件失败: ${e.message}` }], 
-          details: { success: false, error: e.message } 
-        };
-      }
-    },
-  });
-
-  api.registerTool({
-    name: "qq_get_context",
-    label: "QQ获取当前上下文",
-    description: "获取当前消息的上下文信息，包括用户ID、群号、是否主群等。龙虾可以在需要时查看当前对话环境。",
-    parameters: Type.Object({}),
-    async execute(_toolCallId, _params) {
-      const ctx = getCurrentMessageContext();
-      if (!ctx) {
-        return { 
-          content: [{ type: "text", text: "无法获取当前消息上下文" }], 
-          details: { success: false } 
-        };
-      }
-      
-      const info = ctx.isGroup 
-        ? `当前环境: 群聊\n群号: ${ctx.groupId}\n用户ID: ${ctx.userId}\n用户名: ${ctx.senderName}\n是否主群: ${ctx.isPrimary ? '是' : '否'}`
-        : `当前环境: 私聊\n用户ID: ${ctx.userId}\n用户名: ${ctx.senderName}`;
-      
-      return { 
-        content: [{ type: "text", text: info }], 
-        details: { success: true, context: ctx } 
-      };
-    },
-  });
-
-  api.registerTool({
-    name: "qq_send_proactive",
-    label: "QQ主动发送消息",
-    description: "主动发送消息到指定用户或群组，无需等待用户触发。龙虾可以主动联系用户。",
-    parameters: Type.Object({
-      to: Type.String({ description: "目标ID，格式：私聊用QQ号，群聊用 group:群号" }),
-      text: Type.String({ description: "要发送的消息内容" }),
-    }),
-    async execute(_toolCallId, params) {
-      try {
-        const result = await sendProactive({ to: params.to, text: params.text });
-        return { 
-          content: [{ type: "text", text: result.success ? `消息已发送到 ${params.to}` : `发送失败: ${result.error}` }], 
-          details: { success: result.success, error: result.error } 
-        };
-      } catch (e: any) {
-        return { 
-          content: [{ type: "text", text: `发送失败: ${e.message}` }], 
-          details: { success: false, error: e.message } 
-        };
-      }
-    },
-  });
-
-  api.registerTool({
-    name: "qq_broadcast",
-    label: "QQ广播消息",
-    description: "向所有已知用户或群组广播消息。龙虾可以群发通知。",
-    parameters: Type.Object({
-      text: Type.String({ description: "要广播的消息内容" }),
-      type: Type.Optional(Type.Union([Type.Literal("private"), Type.Literal("group")])),
-    }),
-    async execute(_toolCallId, params) {
-      try {
-        const result = await broadcastToKnownUsers(params.text, { type: params.type as any });
-        return { 
-          content: [{ type: "text", text: `广播完成: 成功 ${result.sent}，失败 ${result.failed}` }], 
-          details: { success: true, sent: result.sent, failed: result.failed } 
-        };
-      } catch (e: any) {
-        return { 
-          content: [{ type: "text", text: `广播失败: ${e.message}` }], 
-          details: { success: false, error: e.message } 
-        };
-      }
-    },
-  });
-
-  api.registerTool({
-    name: "qq_get_known_users",
-    label: "QQ获取已知用户",
-    description: "获取已知用户列表统计信息。",
-    parameters: Type.Object({}),
-    async execute(_toolCallId, _params) {
-      try {
-        const stats = getKnownUsersStats();
-        return { 
-          content: [{ type: "text", text: `已知用户统计: 总计 ${stats.totalUsers} 人，私聊 ${stats.privateUsers}，群聊 ${stats.groupUsers}，24h活跃 ${stats.activeIn24h}` }], 
-          details: { success: true, stats } 
-        };
-      } catch (e: any) {
-        return { 
-          content: [{ type: "text", text: `获取失败: ${e.message}` }], 
-          details: { success: false, error: e.message } 
-        };
-      }
-    },
-  });
-
-  api.registerTool({
-    name: "qq_diagnostics",
-    label: "QQ环境诊断",
-    description: "运行QQ插件环境诊断，检查ffmpeg、silk-wasm等依赖。",
-    parameters: Type.Object({}),
-    async execute(_toolCallId, _params) {
-      try {
-        const report = await runDiagnostics();
-        const summary = `平台: ${report.platform}\nNode: ${report.nodeVersion}\nffmpeg: ${report.ffmpeg ?? '未安装'}\nsilk-wasm: ${report.silkWasm ? '可用' : '不可用'}\n警告: ${report.warnings.length}`;
-        return { 
-          content: [{ type: "text", text: summary }], 
-          details: { success: true, report } 
-        };
-      } catch (e: any) {
-        return { 
-          content: [{ type: "text", text: `诊断失败: ${e.message}` }], 
-          details: { success: false, error: e.message } 
-        };
-      }
-    },
-  });
-
-  api.registerTool({
-    name: "qq_lookup_ref",
-    label: "QQ查询引用消息",
-    description: "根据消息ID查询之前记录的消息引用信息。龙虾可以查找历史消息的上下文。",
-    parameters: Type.Object({
-      message_id: Type.String({ description: "要查询的消息ID" }),
-    }),
-    async execute(_toolCallId, params) {
-      try {
-        const ref = lookupRef(params.message_id);
-        if (!ref) {
-          return { 
-            content: [{ type: "text", text: `未找到消息ID ${params.message_id} 的引用记录` }], 
-            details: { success: false, found: false } 
-          };
-        }
-        return { 
-          content: [{ type: "text", text: `消息引用: 发送者 ${ref.sender}，内容: ${ref.text.substring(0, 100)}...` }], 
-          details: { success: true, found: true, ref } 
-        };
-      } catch (e: any) {
-        return { 
-          content: [{ type: "text", text: `查询失败: ${e.message}` }], 
-          details: { success: false, error: e.message } 
-        };
-      }
-    },
-  });
-
-  api.registerTool({
-    name: "qq_get_ref_stats",
-    label: "QQ引用索引统计",
-    description: "获取消息引用索引的统计信息。",
-    parameters: Type.Object({}),
-    async execute(_toolCallId, _params) {
-      try {
-        const stats = getRefIndexStats();
-        return { 
-          content: [{ type: "text", text: `引用索引统计: ${stats.size}/${stats.maxEntries} 条记录，磁盘行数: ${stats.totalLinesOnDisk}` }], 
-          details: { success: true, stats } 
-        };
-      } catch (e: any) {
-        return { 
-          content: [{ type: "text", text: `获取统计失败: ${e.message}` }], 
-          details: { success: false, error: e.message } 
-        };
-      }
-    },
-  });
-
-  api.registerTool({
-    name: "qq_transcribe_voice",
-    label: "QQ语音转文字",
-    description: "将语音文件转换为文字。龙虾可以处理用户发送的语音消息。",
-    parameters: Type.Object({
-      audio_path: Type.String({ description: "语音文件路径（本地路径或URL）" }),
-    }),
-    async execute(_toolCallId, params) {
-      try {
-        const runtime = getQQRuntime();
-        const cfg = runtime.config.loadConfig();
-        const transcription = await transcribeAudioForNapcat(params.audio_path, cfg);
-        if (!transcription) {
-          return { 
-            content: [{ type: "text", text: "语音转文字失败：未配置STT服务或转换失败" }], 
-            details: { success: false, reason: "no_stt_config" } 
-          };
-        }
-        return { 
-          content: [{ type: "text", text: `语音转文字结果: ${transcription}` }], 
-          details: { success: true, transcription } 
-        };
-      } catch (e: any) {
-        return { 
-          content: [{ type: "text", text: `语音转文字失败: ${e.message}` }], 
-          details: { success: false, error: e.message } 
-        };
-      }
-    },
-  });
-
-  api.registerTool({
-    name: "qq_get_member_name",
-    label: "QQ获取群成员名称",
-    description: "从缓存中获取群成员的名称。龙虾可以快速获取群成员信息。",
-    parameters: Type.Object({
-      group_id: Type.Number({ description: "群号" }),
-      user_id: Type.String({ description: "用户ID" }),
-    }),
-    async execute(_toolCallId, params) {
-      try {
-        const name = getCachedMemberName(String(params.group_id), params.user_id);
-        if (!name) {
-          return { 
-            content: [{ type: "text", text: `缓存中未找到群 ${params.group_id} 用户 ${params.user_id} 的名称` }], 
-            details: { success: false, found: false } 
-          };
-        }
-        return { 
-          content: [{ type: "text", text: `群 ${params.group_id} 用户 ${params.user_id} 的名称: ${name}` }], 
-          details: { success: true, found: true, name } 
-        };
-      } catch (e: any) {
-        return { 
-          content: [{ type: "text", text: `获取失败: ${e.message}` }], 
-          details: { success: false, error: e.message } 
-        };
-      }
-    },
-  });
-
-  api.registerTool({
-    name: "qq_get_logs",
-    label: "QQ获取日志",
-    description: "获取最近的日志记录。龙虾可以查看系统运行日志。",
-    parameters: Type.Object({
-      count: Type.Optional(Type.Number({ description: "获取日志条数，默认20，最大100", default: 20 })),
-    }),
-    async execute(_toolCallId, params) {
-      try {
-        const count = Math.min(Math.max(params.count || 20, 1), 100);
-        const logs = getRecentLogs(count);
-        if (logs.length === 0) {
-          return { 
-            content: [{ type: "text", text: "暂无日志记录" }], 
-            details: { success: true, logs: [] } 
-          };
-        }
-        const logText = logs.map(l => `[${l.level}] ${l.msg}`).join("\n");
-        return { 
-          content: [{ type: "text", text: `最近 ${logs.length} 条日志:\n${logText}` }], 
-          details: { success: true, count: logs.length, logs } 
-        };
-      } catch (e: any) {
-        return { 
-          content: [{ type: "text", text: `获取日志失败: ${e.message}` }], 
-          details: { success: false, error: e.message } 
-        };
-      }
-    },
-  });
-
-  api.registerTool({
-    name: "qq_check_update",
-    label: "QQ检查更新",
-    description: "检查QQ插件是否有新版本可用。龙虾可以主动检查更新。",
-    parameters: Type.Object({}),
-    async execute(_toolCallId, _params) {
-      try {
-        const info = await getUpdateInfo();
-        if (info.hasUpdate) {
-          return { 
-            content: [{ type: "text", text: `✨ 有新版本 v${info.latest} 可用！当前版本: v${info.current}` }], 
-            details: { success: true, hasUpdate: true, current: info.current, latest: info.latest } 
-          };
-        } else if (info.error) {
-          return { 
-            content: [{ type: "text", text: `检查更新失败: ${info.error}` }], 
-            details: { success: false, error: info.error } 
-          };
-        }
-        return { 
-          content: [{ type: "text", text: `✅ 已是最新版本 v${info.current}` }], 
-          details: { success: true, hasUpdate: false, current: info.current } 
-        };
-      } catch (e: any) {
-        return { 
-          content: [{ type: "text", text: `检查更新失败: ${e.message}` }], 
-          details: { success: false, error: e.message } 
-        };
-      }
-    },
-  });
-
-  api.registerTool({
-    name: "qq_get_version",
-    label: "QQ获取版本信息",
-    description: "获取QQ插件的版本信息。",
-    parameters: Type.Object({}),
-    async execute(_toolCallId, _params) {
-      try {
-        const version = getPackageVersion(import.meta.url);
-        const nodeVersion = process.version;
-        return { 
-          content: [{ type: "text", text: `OpenClaw QQ 插件 v${version}\nNode.js: ${nodeVersion}` }], 
-          details: { success: true, version, nodeVersion } 
-        };
-      } catch (e: any) {
-        return { 
-          content: [{ type: "text", text: `获取版本失败: ${e.message}` }], 
-          details: { success: false, error: e.message } 
-        };
-      }
-    },
-  });
-
-  api.registerTool({
-    name: "qq_get_data_dir",
-    label: "QQ获取数据目录",
-    description: "获取QQ插件的数据存储目录路径。",
-    parameters: Type.Object({
-      subpath: Type.Optional(Type.String({ description: "子路径，如 'data', 'temp', 'emoji'" })),
-    }),
-    async execute(_toolCallId, params) {
-      try {
-        const dataDir = getQQBotDataDir(params.subpath || "");
-        return { 
-          content: [{ type: "text", text: `数据目录: ${dataDir}` }], 
-          details: { success: true, path: dataDir } 
-        };
-      } catch (e: any) {
-        return { 
-          content: [{ type: "text", text: `获取目录失败: ${e.message}` }], 
-          details: { success: false, error: e.message } 
-        };
-      }
-    },
-  });
-
-  api.registerTool({
-    name: "qq_get_person_info",
-    label: "QQ获取用户档案",
-    description: "获取用户的个人信息档案，包括亲密度、互动次数等。龙虾可以了解与用户的关系。",
-    parameters: Type.Object({
-      user_id: Type.Optional(Type.Number({ description: "用户ID（不填则使用当前对话用户）" })),
-      group_id: Type.Optional(Type.Number({ description: "群号（可选，用于获取群内档案）" })),
-    }),
-    async execute(_toolCallId, params) {
-      try {
-        const ctx = getCurrentMessageContext();
-        const userId = params.user_id || ctx?.userId;
-        const groupId = params.group_id || ctx?.groupId;
-        
-        if (!userId) {
-          return { 
-            content: [{ type: "text", text: "无法确定用户ID" }], 
-            details: { success: false } 
-          };
-        }
-        
-        const personManager = getPersonInfoManager();
-        const personInfo = personManager.getPersonInfo(userId, groupId);
-        
-        if (!personInfo) {
-          return { 
-            content: [{ type: "text", text: `未找到用户 ${userId} 的档案信息` }], 
-            details: { success: false, found: false } 
-          };
-        }
-        
-        const info = `用户 ${userId} 档案:\n亲密度: ${personInfo.intimacyLevel?.toFixed(2) || 0}\n互动次数: ${personInfo.interactionCount || 0}\n最后互动: ${personInfo.lastInteraction ? new Date(personInfo.lastInteraction).toLocaleString() : '无'}`;
-        return { 
-          content: [{ type: "text", text: info }], 
-          details: { success: true, found: true, personInfo } 
+          details: { success: true } 
         };
       } catch (e: any) {
         return { 
@@ -1073,6 +417,361 @@ function registerQQTools(api: OpenClawPluginApi) {
           groupConfig 
         } 
       };
+    },
+  });
+
+  api.registerTool({
+    name: "qq_send_proactive",
+    label: "QQ主动发送消息",
+    description: "主动发送消息给指定目标。龙虾可以主动联系用户或群。目标格式：私聊用QQ号，群聊用\"group:群号\"，频道用\"guild:频道ID:子频道ID\"。",
+    parameters: Type.Object({
+      to: Type.String({ description: "目标：QQ号、group:群号、或guild:频道ID:子频道ID" }),
+      text: Type.String({ description: "消息内容" }),
+      media_url: Type.Optional(Type.String({ description: "媒体URL（图片或文件）" })),
+    }),
+    async execute(_toolCallId, params) {
+      try {
+        const result = await sendProactive({
+          to: params.to,
+          text: params.text,
+          mediaUrl: params.media_url,
+        });
+        
+        if (result.success) {
+          return { 
+            content: [{ type: "text", text: `✅ 消息已发送到 ${params.to}` }], 
+            details: { success: true, to: params.to } 
+          };
+        } else {
+          return { 
+            content: [{ type: "text", text: `发送失败: ${result.error}` }], 
+            details: { success: false, error: result.error } 
+          };
+        }
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `发送失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_broadcast_known_users",
+    label: "QQ广播给已知用户",
+    description: "向已知用户广播消息。可以筛选用户类型（私聊/群/频道）和活跃时间。管理员功能。",
+    parameters: Type.Object({
+      message: Type.String({ description: "要广播的消息内容" }),
+      type: Type.Optional(Type.Union([Type.Literal("private"), Type.Literal("group"), Type.Literal("guild")])),
+      active_within_hours: Type.Optional(Type.Number({ description: "只发送给N小时内活跃的用户" })),
+    }),
+    async execute(_toolCallId, params) {
+      const ctx = getCurrentMessageContext();
+      const runtime = getQQRuntime();
+      const cfg = runtime.config.loadConfig() as any;
+      const qqConfig = cfg?.channels?.qq || {};
+      
+      const isAdmin = ctx && qqConfig.admins?.includes(ctx.userId);
+      
+      if (!isAdmin) {
+        return { 
+          content: [{ type: "text", text: "【需要管理员权限】广播功能需要管理员权限。" }], 
+          details: { success: false, needsAdmin: true } 
+        };
+      }
+      
+      try {
+        const result = await broadcastToKnownUsers(params.message, {
+          type: params.type as any,
+          activeWithin: params.active_within_hours ? params.active_within_hours * 3600000 : undefined,
+        });
+        
+        return { 
+          content: [{ type: "text", text: `广播完成: 成功 ${result.sent}，失败 ${result.failed}` }], 
+          details: { success: true, sent: result.sent, failed: result.failed } 
+        };
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `广播失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_get_known_users_stats",
+    label: "QQ获取已知用户统计",
+    description: "获取已知用户的统计信息，包括总数、各类型数量等。",
+    parameters: Type.Object({}),
+    async execute(_toolCallId, _params) {
+      try {
+        const stats = getKnownUsersStats();
+        return { 
+          content: [{ 
+            type: "text", 
+            text: `已知用户统计:\n总数: ${stats.totalUsers}\n私聊: ${stats.privateUsers}\n群聊: ${stats.groupUsers}\n频道: ${stats.guildUsers}\n24h活跃: ${stats.activeIn24h}\n7天活跃: ${stats.activeIn7d}` 
+          }], 
+          details: { success: true, stats } 
+        };
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `获取统计失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_run_diagnostics",
+    label: "QQ运行环境诊断",
+    description: "运行环境诊断，检查ffmpeg、silk-wasm等依赖是否正常。用于排查问题。",
+    parameters: Type.Object({}),
+    async execute(_toolCallId, _params) {
+      try {
+        const report = await runDiagnostics();
+        const lines = [
+          "=== QQ插件环境诊断 ===",
+          `平台: ${report.platform} (${report.arch})`,
+          `Node: ${report.nodeVersion}`,
+          `主目录: ${report.homeDir}`,
+          `数据目录: ${report.dataDir}`,
+          `ffmpeg: ${report.ffmpeg ?? "未安装"}`,
+          `silk-wasm: ${report.silkWasm ? "可用" : "不可用"}`,
+        ];
+        if (report.warnings.length > 0) {
+          lines.push("--- 警告 ---");
+          lines.push(...report.warnings);
+        }
+        lines.push("====================");
+        
+        return { 
+          content: [{ type: "text", text: lines.join("\n") }], 
+          details: { success: true, report } 
+        };
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `诊断失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_get_data_dir",
+    label: "QQ获取数据目录",
+    description: "获取QQ机器人的数据存储目录路径。",
+    parameters: Type.Object({
+      subpath: Type.Optional(Type.String({ description: "子路径（可选）" })),
+    }),
+    async execute(_toolCallId, params) {
+      try {
+        const dir = params.subpath 
+          ? getQQBotDataDir(...params.subpath.split("/"))
+          : getQQBotDataDir();
+        return { 
+          content: [{ type: "text", text: `数据目录: ${dir}` }], 
+          details: { success: true, path: dir } 
+        };
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `获取目录失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_get_version",
+    label: "QQ获取插件版本",
+    description: "获取QQ插件的当前版本号。",
+    parameters: Type.Object({}),
+    async execute(_toolCallId, _params) {
+      try {
+        const version = getPackageVersion();
+        return { 
+          content: [{ type: "text", text: `QQ插件版本: ${version}` }], 
+          details: { success: true, version } 
+        };
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `获取版本失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_get_recent_logs",
+    label: "QQ获取最近日志",
+    description: "获取最近的运行日志，用于调试和排查问题。",
+    parameters: Type.Object({
+      count: Type.Optional(Type.Number({ description: "获取的日志条数，默认20", default: 20 })),
+    }),
+    async execute(_toolCallId, params) {
+      try {
+        const logs = getRecentLogs(params.count || 20);
+        if (logs.length === 0) {
+          return { 
+            content: [{ type: "text", text: "暂无日志记录" }], 
+            details: { success: true, logs: [] } 
+          };
+        }
+        
+        const formatted = logs.map(l => {
+          const d = new Date(l.ts);
+          const ts = d.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, "");
+          const prefix = l.level === "error" ? "[ERR]" : l.level === "warn" ? "[WRN]" : "[LOG]";
+          return `${ts} ${prefix} ${l.msg}`;
+        }).join("\n");
+        
+        return { 
+          content: [{ type: "text", text: `最近日志:\n${formatted}` }], 
+          details: { success: true, count: logs.length, logs } 
+        };
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `获取日志失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_check_update",
+    label: "QQ检查更新",
+    description: "检查QQ插件是否有新版本可用。",
+    parameters: Type.Object({}),
+    async execute(_toolCallId, _params) {
+      try {
+        const info = await getUpdateInfo();
+        
+        if (info.error) {
+          return { 
+            content: [{ type: "text", text: `检查更新失败: ${info.error}` }], 
+            details: { success: false, error: info.error } 
+          };
+        }
+        
+        if (info.hasUpdate) {
+          return { 
+            content: [{ 
+              type: "text", 
+              text: `🔔 发现新版本!\n当前版本: ${info.current}\n最新版本: ${info.latest}\n\n更新命令: npm update @openclaw/qq` 
+            }], 
+            details: { success: true, hasUpdate: true, info } 
+          };
+        } else {
+          return { 
+            content: [{ type: "text", text: `✅ 已是最新版本: ${info.current}` }], 
+            details: { success: true, hasUpdate: false, info } 
+          };
+        }
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `检查更新失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_lookup_ref",
+    label: "QQ查找引用消息",
+    description: "根据消息ID查找之前记录的引用消息内容。用于查看被回复的消息原文。",
+    parameters: Type.Object({
+      msg_id: Type.String({ description: "消息ID" }),
+    }),
+    async execute(_toolCallId, params) {
+      try {
+        const entry = lookupRef(params.msg_id);
+        
+        if (!entry) {
+          return { 
+            content: [{ type: "text", text: `未找到消息ID ${params.msg_id} 的记录` }], 
+            details: { success: false, found: false } 
+          };
+        }
+        
+        const d = new Date(entry.timestamp);
+        const ts = d.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, "");
+        
+        return { 
+          content: [{ 
+            type: "text", 
+            text: `引用消息:\n发送者: ${entry.sender}${entry.senderId ? ` (${entry.senderId})` : ""}\n时间: ${ts}\n内容: ${entry.text}` 
+          }], 
+          details: { success: true, found: true, entry } 
+        };
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `查找引用失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_get_ref_index_stats",
+    label: "QQ获取引用索引统计",
+    description: "获取引用消息索引的统计信息。",
+    parameters: Type.Object({}),
+    async execute(_toolCallId, _params) {
+      try {
+        const stats = getRefIndexStats();
+        return { 
+          content: [{ 
+            type: "text", 
+            text: `引用索引统计:\n条目数: ${stats.size}\n最大容量: ${stats.maxEntries}\n磁盘行数: ${stats.totalLinesOnDisk}\n存储文件: ${stats.filePath}` 
+          }], 
+          details: { success: true, stats } 
+        };
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `获取统计失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_get_member_name",
+    label: "QQ获取群成员名称",
+    description: "从缓存中获取群成员的名称（名片或昵称）。",
+    parameters: Type.Object({
+      group_id: Type.Number({ description: "群号" }),
+      user_id: Type.Number({ description: "用户ID" }),
+    }),
+    async execute(_toolCallId, params) {
+      try {
+        const name = getCachedMemberName(String(params.group_id), String(params.user_id));
+        
+        if (!name) {
+          return { 
+            content: [{ type: "text", text: `未找到群 ${params.group_id} 中用户 ${params.user_id} 的缓存名称` }], 
+            details: { success: false, found: false } 
+          };
+        }
+        
+        return { 
+          content: [{ type: "text", text: `群 ${params.group_id} 中用户 ${params.user_id} 的名称: ${name}` }], 
+          details: { success: true, found: true, name } 
+        };
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `获取名称失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
     },
   });
 }
