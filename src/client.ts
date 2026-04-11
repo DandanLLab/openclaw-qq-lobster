@@ -384,10 +384,14 @@ export class OneBotClient extends EventEmitter {
   }
 
   sendPrivateMsg(userId: number, message: OneBotMessage | string) {
+    const msgPreview = typeof message === "string" ? message.substring(0, 50) : JSON.stringify(message).substring(0, 100);
+    console.log(`[QQ] 📤 sendPrivateMsg: userId=${userId}, message=${msgPreview}...`);
     this.send("send_private_msg", { user_id: userId, message });
   }
 
   sendGroupMsg(groupId: number, message: OneBotMessage | string) {
+    const msgPreview = typeof message === "string" ? message.substring(0, 50) : JSON.stringify(message).substring(0, 100);
+    console.log(`[QQ] 📤 sendGroupMsg: groupId=${groupId}, message=${msgPreview}...`);
     this.send("send_group_msg", { group_id: groupId, message });
   }
 

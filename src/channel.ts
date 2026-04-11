@@ -1676,45 +1676,129 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
   },
   outbound: {
     sendText: async ({ to, text, accountId, ...rest }) => {
+        console.log(`[QQ] 📤 outbound.sendText 被调用: to=${to}, accountId=${accountId}, text长度=${text?.length || 0}`);
         const replyTo = (rest as any).replyTo;
         const client = getQQClient(accountId || DEFAULT_ACCOUNT_ID);
-        if (!client) return { channel: "qq", sent: false, error: "Client not connected", messageId: undefined };
-        const chunks = splitMessage(text, 4000);
-        let lastMessageId: string | undefined;
-        for (let i = 0; i < chunks.length; i++) {
-            let message: OneBotMessage | string = chunks[i];
-            if (replyTo && i === 0) message = [ { type: "reply", data: { id: String(replyTo) } }, { type: "text", data: { text: chunks[i] } } ];
-            
-            if (to.startsWith("group:")) client.sendGroupMsg(parseInt(to.replace("group:", ""), 10), message);
-            else if (to.startsWith("guild:")) {
-                const parts = to.split(":");
-                if (parts.length >= 3) client.sendGuildChannelMsg(parts[1], parts[2], message);
-            }
-            else client.sendPrivateMsg(parseInt(to, 10), message);
-            
-            if (chunks.length > 1) await sleep(1000); 
+        if (!client) {
+          console.error(`[QQ] ❌ outbound.sendText 失败: Client not connected (accountId=${accountId})`);
+          return { channel: "qq", sent: false, error: "Client not connected", messageId: undefined };
         }
-        return { channel: "qq", sent: true, messageId: lastMessageId };
+        console.log(`[QQ] ✅ Client 已获取, isConnected=${client.isConnected()}`);
+        
+        const segmentation = pluginManager.getSmartSegmentation();
+        console.log(`[QQ] 📊 outbound 开始分段处理, 原始长度: ${text?.length || 0}`);
+        
+        let segments: string[] = [];
+        try {
+          segments = segmentation.segment(text);
+        } catch (e) {
+          console.warn("[QQ] outbound 分段失败，使用原始文本:", e);
+          segments = [text];
+        }
+        
+        if (segments.length === 0) {
+          console.log(`[QQ] ⏭️ outbound 分段结果为空，跳过发送`);
+          return { channel: "qq", sent: false, error: "Empty segments", messageId: undefined };
+        }
+        
+        console.log(`[QQ] 🔪 outbound 分段完成，共 ${segments.length} 段`);
+        
+        let lastMessageId: string | undefined;
+        let sentCount = 0;
+        let failedCount = 0;
+        
+        for (let segIdx = 0; segIdx < segments.length; segIdx++) {
+            const segment = segments[segIdx];
+            console.log(`[QQ] 📤 处理分段 ${segIdx + 1}/${segments.length}: ${segment.substring(0, 50)}...`);
+            
+            const chunks = splitMessage(segment, 4000);
+            console.log(`[QQ] 📤 分段 ${segIdx + 1} 拆分为 ${chunks.length} 个 chunk(s)`);
+            
+            for (let i = 0; i < chunks.length; i++) {
+              let message: OneBotMessage | string = chunks[i];
+              if (replyTo && segIdx === 0 && i === 0) {
+                message = [ { type: "reply", data: { id: String(replyTo) } }, { type: "text", data: { text: chunks[i] } } ];
+              }
+              
+              console.log(`[QQ] 📤 发送 chunk ${i + 1}/${chunks.length} (分段 ${segIdx + 1}/${segments.length})`);
+              
+              try {
+                if (to.startsWith("group:")) {
+                  const groupId = parseInt(to.replace("group:", ""), 10);
+                  console.log(`[QQ] 📤 调用 sendGroupMsg: groupId=${groupId}`);
+                  client.sendGroupMsg(groupId, message);
+                  sentCount++;
+                }
+                else if (to.startsWith("guild:")) {
+                    const parts = to.split(":");
+                    if (parts.length >= 3) {
+                      console.log(`[QQ] 📤 调用 sendGuildChannelMsg: guildId=${parts[1]}, channelId=${parts[2]}`);
+                      client.sendGuildChannelMsg(parts[1], parts[2], message);
+                      sentCount++;
+                    }
+                }
+                else {
+                  const userId = parseInt(to, 10);
+                  console.log(`[QQ] 📤 调用 sendPrivateMsg: userId=${userId}`);
+                  client.sendPrivateMsg(userId, message);
+                  sentCount++;
+                }
+              } catch (err) {
+                console.error(`[QQ] ❌ 发送失败: ${err}`);
+                failedCount++;
+              }
+              
+              if (chunks.length > 1) await sleep(1000); 
+            }
+            
+            if (segments.length > 1) await sleep(500);
+        }
+        
+        console.log(`[QQ] ✅ outbound.sendText 完成: to=${to}, 发送=${sentCount}, 失败=${failedCount}`);
+        return { channel: "qq", sent: sentCount > 0, messageId: lastMessageId };
     },
     sendMedia: async ({ to, text, mediaUrl, accountId, ...rest }) => {
+         console.log(`[QQ] 📤 outbound.sendMedia 被调用: to=${to}, accountId=${accountId}, mediaUrl=${mediaUrl?.substring(0, 50)}`);
          const replyTo = (rest as any).replyTo;
          const client = getQQClient(accountId || DEFAULT_ACCOUNT_ID);
-         if (!client) return { channel: "qq", sent: false, error: "Client not connected", messageId: undefined };
+         if (!client) {
+           console.error(`[QQ] ❌ outbound.sendMedia 失败: Client not connected (accountId=${accountId})`);
+           return { channel: "qq", sent: false, error: "Client not connected", messageId: undefined };
+         }
          
          const finalUrl = await resolveMediaUrl(mediaUrl);
+         console.log(`[QQ] 📤 媒体URL已解析: ${finalUrl.substring(0, 80)}...`);
          
          const message: OneBotMessage = [];
          if (replyTo) message.push({ type: "reply", data: { id: String(replyTo) } });
          if (text) message.push({ type: "text", data: { text } });
-         if (isImageFile(mediaUrl)) message.push({ type: "image", data: { file: finalUrl } });
-         else message.push({ type: "text", data: { text: `[CQ:file,file=${finalUrl},url=${finalUrl}]` } });
+         if (isImageFile(mediaUrl)) {
+           message.push({ type: "image", data: { file: finalUrl } });
+           console.log(`[QQ] 📤 添加图片消息段`);
+         }
+         else {
+           message.push({ type: "text", data: { text: `[CQ:file,file=${finalUrl},url=${finalUrl}]` } });
+           console.log(`[QQ] 📤 添加文件消息段`);
+         }
          
-         if (to.startsWith("group:")) client.sendGroupMsg(parseInt(to.replace("group:", ""), 10), message);
+         if (to.startsWith("group:")) {
+           const groupId = parseInt(to.replace("group:", ""), 10);
+           console.log(`[QQ] 📤 调用 sendGroupMsg (media): groupId=${groupId}`);
+           client.sendGroupMsg(groupId, message);
+         }
          else if (to.startsWith("guild:")) {
              const parts = to.split(":");
-             if (parts.length >= 3) client.sendGuildChannelMsg(parts[1], parts[2], message);
+             if (parts.length >= 3) {
+               console.log(`[QQ] 📤 调用 sendGuildChannelMsg (media): guildId=${parts[1]}, channelId=${parts[2]}`);
+               client.sendGuildChannelMsg(parts[1], parts[2], message);
+             }
          }
-         else client.sendPrivateMsg(parseInt(to, 10), message);
+         else {
+           const userId = parseInt(to, 10);
+           console.log(`[QQ] 📤 调用 sendPrivateMsg (media): userId=${userId}`);
+           client.sendPrivateMsg(userId, message);
+         }
+         console.log(`[QQ] ✅ outbound.sendMedia 完成: to=${to}`);
          return { channel: "qq", sent: true, messageId: undefined };
     },
     // @ts-ignore
