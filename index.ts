@@ -774,6 +774,45 @@ function registerQQTools(api: OpenClawPluginApi) {
       }
     },
   });
+
+  api.registerTool({
+    name: "qq_send_emoji_reaction",
+    label: "QQ发送表情回应",
+    description: "对群消息发送表情回应（表情贴）。龙虾可以根据对话内容判断是否需要发送表情回应，比如对方说了有趣的话、感谢、夸奖等情况下可以发送👍等表情。只在群聊中有效。",
+    parameters: Type.Object({
+      emoji_id: Type.String({ description: "表情ID，如 128077 (👍)、128078 (👎)、128522 (😊) 等" }),
+    }),
+    async execute(_toolCallId, params) {
+      const client = getQQClient("default");
+      if (!client) {
+        return { content: [{ type: "text", text: "QQ客户端未连接" }], details: { success: false } };
+      }
+      
+      const ctx = getCurrentMessageContext();
+      if (!ctx || !ctx.isGroup) {
+        return { content: [{ type: "text", text: "当前不在群聊环境中，无法发送表情回应" }], details: { success: false } };
+      }
+      
+      const messageId = ctx.messageId;
+      if (!messageId) {
+        return { content: [{ type: "text", text: "无法获取当前消息ID" }], details: { success: false } };
+      }
+      
+      try {
+        client.setGroupReaction(ctx.groupId!, String(messageId), params.emoji_id);
+        console.log(`[QQ] 🎯 龙虾主动发送表情回应: ${params.emoji_id}`);
+        return { 
+          content: [{ type: "text", text: `✅ 已发送表情回应` }], 
+          details: { success: true, emoji_id: params.emoji_id, group_id: ctx.groupId } 
+        };
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `发送表情回应失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
 }
 
 const plugin = {

@@ -151,7 +151,7 @@ export class SmartSegmentation {
       console.log(`[SmartSegmentation] ⚠️ 文本为空，跳过分段`);
       return false;
     }
-    const segmentChars = ['。', '！', '？', '：', '；', '～', '…', '.', '!', '?', ':', ';', '~', '-', '（', '(', '）', ')'];
+    const segmentChars = ['。', '！', '？', '：', '；', '～', '…', '.', '!', '?', ':', ';',  '（', '(', '）', ')'];
     const hasSegmentChar = segmentChars.some(char => text.includes(char));
     console.log(`[SmartSegmentation] 🔍 包含分段字符: ${hasSegmentChar}`);
     return hasSegmentChar;
@@ -221,6 +221,87 @@ export class SmartSegmentation {
       return codeBlocks.some(block => pos >= block.start && pos < block.end);
     };
     
+    const findQuoteEnd = (start: number, quoteChar: string): number => {
+      for (let j = start + 1; j < processed.length; j++) {
+        if (processed[j] === quoteChar) {
+          return j;
+        }
+      }
+      return -1;
+    };
+    
+    const findBracketEnd = (start: number, openChar: string): number => {
+      const closeChar = openChar === '（' ? '）' : openChar === '(' ? ')' : openChar === '【' ? '】' : openChar === '[' ? ']' : openChar;
+      let depth = 1;
+      for (let j = start + 1; j < processed.length; j++) {
+        if (processed[j] === openChar) {
+          depth++;
+        } else if (processed[j] === closeChar) {
+          depth--;
+          if (depth === 0) {
+            return j;
+          }
+        }
+      }
+      return processed.length - 1;
+    };
+    
+    const quotePairs: { start: number; end: number }[] = [];
+    const bracketPairs: { start: number; end: number }[] = [];
+    
+    const quoteChars = ['"', '"', '"', "'", '"'];
+    const bracketChars = ['(', '（', '[', '【'];
+    
+    let tempProcessed = processed;
+    for (let j = 0; j < tempProcessed.length; j++) {
+      if (quoteChars.includes(tempProcessed[j])) {
+        const endPos = findQuoteEnd(j, tempProcessed[j]);
+        if (endPos > j) {
+          quotePairs.push({ start: j, end: endPos });
+          j = endPos;
+        }
+      }
+    }
+    
+    for (let j = 0; j < tempProcessed.length; j++) {
+      if (bracketChars.includes(tempProcessed[j])) {
+        const endPos = findBracketEnd(j, tempProcessed[j]);
+        if (endPos > j) {
+          bracketPairs.push({ start: j, end: endPos });
+          j = endPos;
+        }
+      }
+    }
+    
+    const isInQuote = (pos: number): boolean => {
+      return quotePairs.some(pair => pos > pair.start && pos < pair.end);
+    };
+    
+    const isInBracket = (pos: number): boolean => {
+      return bracketPairs.some(pair => pos >= pair.start && pos <= pair.end);
+    };
+    
+    const getBracketPair = (pos: number): { start: number; end: number } | null => {
+      return bracketPairs.find(pair => pos === pair.start) || null;
+    };
+    
+    const isRegexBracket = (pair: { start: number; end: number }): boolean => {
+      const content = processed.substring(pair.start + 1, pair.end);
+      const regexChars = ['|', '*', '?', '+', '.', '\\', '^', '$', '{', '}'];
+      return regexChars.some(c => content.includes(c));
+    };
+    
+    const isPrefixColon = (pos: number): boolean => {
+      const prefixes = ['ps', 'PS', 'Ps', 'pS', 'PS', 'ps', 'Ps', 'PS'];
+      const beforeColon = processed.substring(Math.max(0, pos - 10), pos).toLowerCase().trim();
+      for (const prefix of prefixes) {
+        if (beforeColon.endsWith(prefix) || beforeColon.endsWith(prefix + ' ')) {
+          return true;
+        }
+      }
+      return false;
+    };
+    
     while (i < processed.length) {
       const char = processed[i];
       
@@ -231,11 +312,7 @@ export class SmartSegmentation {
             segments.push(this.removePeriod(current.trim()));
             current = '';
           }
-          let codeContent = block.content;
-          codeContent = codeContent.replace(/^```\w*\r?\n?/, '');
-          codeContent = codeContent.replace(/\r?\n?```$/, '');
-          codeContent = codeContent.trim();
-          segments.push(codeContent);
+          segments.push(block.content);
           i = block.end;
           continue;
         }
@@ -244,25 +321,34 @@ export class SmartSegmentation {
         continue;
       }
       
-      if (char === '（' || char === '(') {
-        let endIndex = processed.indexOf(char === '（' ? '）' : ')', i + 1);
-        if (endIndex === -1) {
-          endIndex = processed.length - 1;
-        }
-        const bracketContent = processed.substring(i, endIndex + 1);
+      const bracketPair = getBracketPair(i);
+      if (bracketPair && !isRegexBracket(bracketPair)) {
         if (current.trim()) {
           segments.push(this.removePeriod(current.trim()));
           current = '';
         }
-        segments.push(this.removePeriod(bracketContent.trim()));
-        i = endIndex + 1;
+        const bracketContent = processed.substring(bracketPair.start, bracketPair.end + 1);
+        segments.push(bracketContent);
+        i = bracketPair.end + 1;
         continue;
       }
       
       current += char;
       
-      const segmentChars = ['。', '！', '？', '：', '；', '～', '…', '.', '!', '?', ':', ';', '~', '-'];
+      const segmentChars = ['。', '！', '？', '：', '；', '～', '…', '.', '!', '?', ';', '~'];
       const isEllipsis = char === '…';
+      
+      if (isInQuote(i)) {
+        i++;
+        continue;
+      }
+      
+      if (char === '：' || char === ':') {
+        if (isPrefixColon(i)) {
+          i++;
+          continue;
+        }
+      }
       
       if (isEllipsis) {
         while (i + 1 < processed.length && processed[i + 1] === '…') {

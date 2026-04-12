@@ -6,6 +6,7 @@ interface MessageContext {
   isPrimary: boolean;
   accountId: string;
   timestamp: number;
+  messageId?: string | number;
 }
 
 class MessageContextManager {

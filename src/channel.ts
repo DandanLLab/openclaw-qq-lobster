@@ -1071,14 +1071,7 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                 client.markGroupMsgAsRead(groupId);
             }
             
-            if (isGroup && config.reactionEmoji && event.message_id) {
-                try {
-                    client.setGroupReaction(groupId, String(event.message_id), config.reactionEmoji);
-                    console.log(`[QQ] 已回应表情: ${config.reactionEmoji}`);
-                } catch (e) {
-                    console.warn(`[QQ] 表情回应失败:`, e);
-                }
-            }
+
 
             const processedContext = botContext.processMessage(text, userId, groupId);
             const emotionInfo = processedContext.emotion;
@@ -1405,6 +1398,7 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                 isPrimary: isGroup ? isPrimaryGroup(config, groupId!) : false,
                 accountId: account.accountId,
                 timestamp: event.time * 1000,
+                messageId: event.message_id,
             });
 
             let pfcReasoning: string | undefined;
