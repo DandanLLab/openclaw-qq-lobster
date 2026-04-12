@@ -1552,7 +1552,11 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                          let chunk = chunks[i];
                          if (isGroup && segIdx === 0 && i === 0) chunk = `[CQ:at,qq=${userId}] ${chunk}`;
                          
-                         console.log(`[QQ] 📤 发送消息到QQ: ${isGroup ? `群${groupId}` : `用户${userId}`}, 内容: ${chunk.substring(0, 50)}...`);
+                         const groupCtx = isGroup && groupId ? getGroupContext(groupId) : undefined;
+                         const targetName = isGroup 
+                           ? (groupCtx?.groupName ? `群${groupId}(${groupCtx.groupName})` : `群${groupId}`)
+                           : `用户${userId}`;
+                         console.log(`[QQ] 📤 发送消息到QQ: ${targetName}, 内容: ${chunk.substring(0, 50)}...`);
                          
                          if (isGroup) client.sendGroupMsg(groupId, chunk);
                          else if (isGuild) client.sendGuildChannelMsg(guildId, channelId, chunk);
@@ -1665,6 +1669,9 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
             });
             
             console.log(`[QQ] 会话上下文: SessionKey=${ctxPayload.SessionKey}, From=${fromId}, ChatType=${ctxPayload.ChatType}`);
+            console.log(`[QQ] 📋 消息ID: MessageSid=${ctxPayload.MessageSid}, ReplyToId=${ctxPayload.ReplyToId || '无'}`);
+            console.log(`[QQ] 📋 发送者: SenderId=${ctxPayload.SenderId}, SenderName=${ctxPayload.SenderName}`);
+            console.log(`[QQ] 📋 消息内容预览: ${text.substring(0, 100)}...`);
             
             await runtime.channel.session.recordInboundSession({
                 storePath: runtime.channel.session.resolveStorePath(cfg.session?.store, { agentId: "default" }),
