@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import * as fsSync from "node:fs";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
+// fileURLToPath 保留供将来使用
 import {
   type ChannelPlugin,
   type ChannelAccountSnapshot,
@@ -1399,8 +1399,14 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
               if (cachedGroupInfo) {
                 groupName = cachedGroupInfo.groupName;
                 memberCount = cachedGroupInfo.memberCount;
+                updateGroupContext(groupId, groupName, memberCount);
               } else {
-                populateGroupInfoCache(client, groupId).catch(() => {});
+                populateGroupInfoCache(client, groupId).then(() => {
+                  const info = getCachedGroupInfo(String(groupId));
+                  if (info) {
+                    updateGroupContext(groupId, info.groupName, info.memberCount);
+                  }
+                }).catch(() => {});
               }
 
               const cachedMemberInfo = getCachedMemberInfo(String(groupId), String(userId));
@@ -1652,6 +1658,8 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                 SenderId: String(userId), SenderName: event.sender?.nickname || "Unknown", ConversationLabel: conversationLabel,
                 SessionKey: `qq:${fromId}`, AccountId: account.accountId, ChatType: isGroup ? "group" : isGuild ? "channel" : "direct", Timestamp: event.time * 1000,
                 OriginatingChannel: "qq", OriginatingTo: fromId, CommandAuthorized: true,
+                MessageSid: String(event.message_id),
+                MessageSidFull: String(event.message_id),
                 ...(extractImageUrls(event.message).length > 0 && { MediaUrls: extractImageUrls(event.message) }),
                 ...(replyMsgId && { ReplyToId: replyMsgId, ReplyToBody: replyToBody, ReplyToSender: replyToSender }),
             });
