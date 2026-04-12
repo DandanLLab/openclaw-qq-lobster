@@ -151,7 +151,7 @@ export class SmartSegmentation {
       console.log(`[SmartSegmentation] ⚠️ 文本为空，跳过分段`);
       return false;
     }
-    const segmentChars = ['。', '！', '？', '：', '；', '～', '…', '.', '!', '?', ':', ';',  '（', '(', '）', ')'];
+    const segmentChars = ['。', '！', '？', '；', '～', '…', '!', '?', ';', '~'];
     const hasSegmentChar = segmentChars.some(char => text.includes(char));
     console.log(`[SmartSegmentation] 🔍 包含分段字符: ${hasSegmentChar}`);
     return hasSegmentChar;
@@ -296,27 +296,6 @@ export class SmartSegmentation {
       return bracketPairs.some(pair => pos >= pair.start && pos <= pair.end);
     };
     
-    const getBracketPair = (pos: number): { start: number; end: number } | null => {
-      return bracketPairs.find(pair => pos === pair.start) || null;
-    };
-    
-    const isRegexBracket = (pair: { start: number; end: number }): boolean => {
-      const content = processed.substring(pair.start + 1, pair.end);
-      const regexChars = ['|', '*', '?', '+', '.', '\\', '^', '$', '{', '}'];
-      return regexChars.some(c => content.includes(c));
-    };
-    
-    const isPrefixColon = (pos: number): boolean => {
-      const prefixes = ['ps', 'PS', 'Ps', 'pS', 'PS', 'ps', 'Ps', 'PS'];
-      const beforeColon = processed.substring(Math.max(0, pos - 10), pos).toLowerCase().trim();
-      for (const prefix of prefixes) {
-        if (beforeColon.endsWith(prefix) || beforeColon.endsWith(prefix + ' ')) {
-          return true;
-        }
-      }
-      return false;
-    };
-    
     while (i < processed.length) {
       const char = processed[i];
       
@@ -364,33 +343,14 @@ export class SmartSegmentation {
         continue;
       }
       
-      const bracketPair = getBracketPair(i);
-      if (bracketPair && !isRegexBracket(bracketPair)) {
-        if (current.trim()) {
-          segments.push(this.removePeriod(current.trim()));
-          current = '';
-        }
-        const bracketContent = processed.substring(bracketPair.start, bracketPair.end + 1);
-        segments.push(bracketContent);
-        i = bracketPair.end + 1;
-        continue;
-      }
-      
       current += char;
       
-      const segmentChars = ['。', '！', '？', '：', '；', '～', '…', '.', '!', '?', ';', '~'];
+      const segmentChars = ['。', '！', '？', '；', '～', '!', '?', ';', '~'];
       const isEllipsis = char === '…';
       
-      if (isInQuote(i)) {
+      if (isInQuote(i) || isInBracket(i)) {
         i++;
         continue;
-      }
-      
-      if (char === '：' || char === ':') {
-        if (isPrefixColon(i)) {
-          i++;
-          continue;
-        }
       }
       
       if (isEllipsis) {
@@ -528,7 +488,7 @@ export class SmartSegmentation {
       return [];
     }
 
-    const segmentChars = ['。', '！', '？', '：', '；', '～', '…', '.', '!', '?', ':', ';', '~', '-', '（', '(', '）', ')'];
+    const segmentChars = ['。', '！', '？', '；', '～', '…', '!', '?', ';', '~'];
     const hasSegmentChar = segmentChars.some(char => visibleText.includes(char));
     
     if (!hasSegmentChar) {

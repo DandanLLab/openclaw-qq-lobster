@@ -179,7 +179,7 @@ export function stripMarkdown(text: string): string {
   return text
     .replace(/\*\*(.*?)\*\*/g, "$1")
     .replace(/\*(.*?)\*/g, "$1")
-    .replace(/```[\s\S]*?```/g, "[代码块]")
+    .replace(/```(\w*)\n?([\s\S]*?)```/g, "$2")
     .replace(/`(.*?)`/g, "$1")
     .replace(/#+\s+(.*)/g, "$1")
     .replace(/\[(.*?)\]\(.*?\)/g, "$1")
