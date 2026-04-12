@@ -1012,7 +1012,7 @@ function registerQQTools(api: OpenClawPluginApi) {
       try {
         const result = await client.sendApiWithResponse("get_msg", { message_id: params.message_id });
         
-        if (result?.status === 'ok' || result?.data) {
+        if (result?.status === 'ok' || result?.retcode === 0) {
           const msg = result.data || result;
           const summary = `消息信息:
 - 消息ID: ${msg.message_id}
@@ -1060,8 +1060,10 @@ function registerQQTools(api: OpenClawPluginApi) {
       
       try {
         const result = await client.sendApiWithResponse("get_group_member_info", { group_id: ctx.groupId, user_id: targetUserId });
-        const info = result.data || result;
-        const summary = `群成员信息:
+        
+        if (result?.status === 'ok' || result?.retcode === 0) {
+          const info = result.data || result;
+          const summary = `群成员信息:
 - QQ号: ${info.user_id}
 - 昵称: ${info.nickname}
 - 群名片: ${info.card || "(无)"}
@@ -1069,10 +1071,16 @@ function registerQQTools(api: OpenClawPluginApi) {
 - 年龄: ${info.age || "未知"}
 - 角色: ${info.role === 'owner' ? '群主' : info.role === 'admin' ? '管理员' : '成员'}
 - 入群时间: ${info.join_time ? new Date(info.join_time * 1000).toLocaleString() : "未知"}`;
-        return { 
-          content: [{ type: "text", text: summary }], 
-          details: { success: true, info } 
-        };
+          return { 
+            content: [{ type: "text", text: summary }], 
+            details: { success: true, info } 
+          };
+        } else {
+          return { 
+            content: [{ type: "text", text: `获取群成员信息失败: ${result?.wording || '未知错误'}` }], 
+            details: { success: false, error: result?.wording } 
+          };
+        }
       } catch (e: any) {
         return { 
           content: [{ type: "text", text: `获取群成员信息失败: ${e.message}` }], 
@@ -1100,16 +1108,24 @@ function registerQQTools(api: OpenClawPluginApi) {
       
       try {
         const result = await client.sendApiWithResponse("get_group_info", { group_id: ctx.groupId });
-        const info = result.data || result;
-        const summary = `群信息:
+        
+        if (result?.status === 'ok' || result?.retcode === 0) {
+          const info = result.data || result;
+          const summary = `群信息:
 - 群号: ${info.group_id}
 - 群名: ${info.group_name}
 - 成员数: ${info.member_count}
 - 群容量: ${info.max_member_count}`;
-        return { 
-          content: [{ type: "text", text: summary }], 
-          details: { success: true, info } 
-        };
+          return { 
+            content: [{ type: "text", text: summary }], 
+            details: { success: true, info } 
+          };
+        } else {
+          return { 
+            content: [{ type: "text", text: `获取群信息失败: ${result?.wording || '未知错误'}` }], 
+            details: { success: false, error: result?.wording } 
+          };
+        }
       } catch (e: any) {
         return { 
           content: [{ type: "text", text: `获取群信息失败: ${e.message}` }], 
