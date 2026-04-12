@@ -879,12 +879,19 @@ function registerQQTools(api: OpenClawPluginApi) {
       const times = Math.min(Math.max(params.times || 1, 1), 10);
       
       try {
-        client.sendApi("send_like", { user_id: targetUserId, times });
-        console.log(`[QQ] 👍 龙虾发送好友赞: 用户${targetUserId}, ${times}次`);
-        return { 
-          content: [{ type: "text", text: `✅ 已给用户 ${targetUserId} 点赞 ${times} 次` }], 
-          details: { success: true, user_id: targetUserId, times } 
-        };
+        const result = await client.sendApiWithResponse("send_like", { user_id: targetUserId, times });
+        if (result?.status === 'ok' || result?.retcode === 0) {
+          console.log(`[QQ] 👍 龙虾发送好友赞: 用户${targetUserId}, ${times}次`);
+          return { 
+            content: [{ type: "text", text: `✅ 已给用户 ${targetUserId} 点赞 ${times} 次` }], 
+            details: { success: true, user_id: targetUserId, times } 
+          };
+        } else {
+          return { 
+            content: [{ type: "text", text: `点赞失败: ${result?.wording || '未知错误'}` }], 
+            details: { success: false, error: result?.wording } 
+          };
+        }
       } catch (e: any) {
         return { 
           content: [{ type: "text", text: `发送点赞失败: ${e.message}` }], 
@@ -916,15 +923,115 @@ function registerQQTools(api: OpenClawPluginApi) {
       const targetUserId = params.user_id || ctx.userId;
       
       try {
-        client.sendApi("set_group_card", { group_id: ctx.groupId, user_id: targetUserId, card: params.card || "" });
-        console.log(`[QQ] 📝 龙虾设置群名片: 群${ctx.groupId} 用户${targetUserId} -> ${params.card}`);
-        return { 
-          content: [{ type: "text", text: `✅ 已设置群名片: ${params.card || "(已删除)"}` }], 
-          details: { success: true, user_id: targetUserId, group_id: ctx.groupId } 
-        };
+        const result = await client.sendApiWithResponse("set_group_card", { group_id: ctx.groupId, user_id: targetUserId, card: params.card || "" });
+        if (result?.status === 'ok' || result?.retcode === 0) {
+          console.log(`[QQ] 📝 龙虾设置群名片: 群${ctx.groupId} 用户${targetUserId} -> ${params.card}`);
+          return { 
+            content: [{ type: "text", text: `✅ 已设置群名片: ${params.card || "(已删除)"}` }], 
+            details: { success: true, user_id: targetUserId, group_id: ctx.groupId } 
+          };
+        } else {
+          return { 
+            content: [{ type: "text", text: `设置群名片失败: ${result?.wording || '未知错误'}` }], 
+            details: { success: false, error: result?.wording } 
+          };
+        }
       } catch (e: any) {
         return { 
           content: [{ type: "text", text: `设置群名片失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_reply_with_quote",
+    label: "QQ引用回复",
+    description: "发送带引用的消息。当需要回复很久之前的消息时，可以使用此功能引用那条消息。需要提供消息ID和回复内容。只在群聊中有效。",
+    parameters: Type.Object({
+      message_id: Type.Number({ description: "要引用的消息ID" }),
+      message: Type.String({ description: "回复的消息内容" }),
+    }),
+    async execute(_toolCallId, params) {
+      const client = getQQClient("default");
+      if (!client) {
+        return { content: [{ type: "text", text: "QQ客户端未连接" }], details: { success: false } };
+      }
+      
+      const ctx = getCurrentMessageContext();
+      if (!ctx || !ctx.isGroup) {
+        return { content: [{ type: "text", text: "当前不在群聊环境中，无法发送引用回复" }], details: { success: false } };
+      }
+      
+      try {
+        const replyMessage = [
+          { type: "reply", data: { id: String(params.message_id) } },
+          { type: "text", data: { text: params.message } }
+        ];
+        
+        const result = await client.sendApiWithResponse("send_group_msg", { 
+          group_id: ctx.groupId, 
+          message: replyMessage 
+        });
+        
+        if (result?.status === 'ok' || result?.retcode === 0) {
+          console.log(`[QQ] 💬 龙虾发送引用回复: 群${ctx.groupId}, 引用消息${params.message_id}`);
+          return { 
+            content: [{ type: "text", text: `✅ 已发送引用回复` }], 
+            details: { success: true, message_id: params.message_id, group_id: ctx.groupId } 
+          };
+        } else {
+          return { 
+            content: [{ type: "text", text: `发送引用回复失败: ${result?.wording || '未知错误'}` }], 
+            details: { success: false, error: result?.wording } 
+          };
+        }
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `发送引用回复失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_get_msg",
+    label: "QQ获取消息",
+    description: "获取指定消息的详细信息。当需要引用很久之前的消息时，可以先用此工具获取消息内容。需要提供消息ID。",
+    parameters: Type.Object({
+      message_id: Type.Number({ description: "要获取的消息ID" }),
+    }),
+    async execute(_toolCallId, params) {
+      const client = getQQClient("default");
+      if (!client) {
+        return { content: [{ type: "text", text: "QQ客户端未连接" }], details: { success: false } };
+      }
+      
+      try {
+        const result = await client.sendApiWithResponse("get_msg", { message_id: params.message_id });
+        
+        if (result?.status === 'ok' || result?.data) {
+          const msg = result.data || result;
+          const summary = `消息信息:
+- 消息ID: ${msg.message_id}
+- 发送者: ${msg.sender?.nickname || '未知'} (${msg.sender?.user_id || '未知'})
+- 时间: ${msg.time ? new Date(msg.time * 1000).toLocaleString() : '未知'}
+- 内容: ${msg.message || '(无法获取)'}`;
+          return { 
+            content: [{ type: "text", text: summary }], 
+            details: { success: true, msg } 
+          };
+        } else {
+          return { 
+            content: [{ type: "text", text: `获取消息失败: ${result?.wording || '消息不存在或已过期'}` }], 
+            details: { success: false, error: result?.wording } 
+          };
+        }
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `获取消息失败: ${e.message}` }], 
           details: { success: false, error: e.message } 
         };
       }
@@ -1026,12 +1133,19 @@ function registerQQTools(api: OpenClawPluginApi) {
       }
       
       try {
-        client.sendApi("delete_msg", { message_id: params.message_id });
-        console.log(`[QQ] 🗑️ 龙虾撤回消息: ${params.message_id}`);
-        return { 
-          content: [{ type: "text", text: `✅ 已撤回消息 ${params.message_id}` }], 
-          details: { success: true, message_id: params.message_id } 
-        };
+        const result = await client.sendApiWithResponse("delete_msg", { message_id: params.message_id });
+        if (result?.status === 'ok' || result?.retcode === 0) {
+          console.log(`[QQ] 🗑️ 龙虾撤回消息: ${params.message_id}`);
+          return { 
+            content: [{ type: "text", text: `✅ 已撤回消息 ${params.message_id}` }], 
+            details: { success: true, message_id: params.message_id } 
+          };
+        } else {
+          return { 
+            content: [{ type: "text", text: `撤回消息失败: ${result?.wording || '未知错误'}` }], 
+            details: { success: false, error: result?.wording } 
+          };
+        }
       } catch (e: any) {
         return { 
           content: [{ type: "text", text: `撤回消息失败: ${e.message}` }], 
