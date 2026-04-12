@@ -169,7 +169,7 @@ export class SmartSegmentation {
 
   removePeriod(text: string): string {
     if (!text) return '';
-    return text.replace(/[。.]$/g, '');
+    return text.replace(/。$/g, '');
   }
 
   convertEnglishPunctuation(text: string): string {
@@ -211,7 +211,14 @@ export class SmartSegmentation {
       codeBlocks.push({ start: match.index, end: match.index + match[0].length, content: match[0] });
     }
     
-    console.log(`[SmartSegmentation] 🔪 发现 ${codeBlocks.length} 个代码块`);
+    const dashBlocks: { start: number; end: number; content: string }[] = [];
+    const dashBlockRegex = /---[\s\S]*?---/g;
+    let dashMatch;
+    while ((dashMatch = dashBlockRegex.exec(processed)) !== null) {
+      dashBlocks.push({ start: dashMatch.index, end: dashMatch.index + dashMatch[0].length, content: dashMatch[0] });
+    }
+    
+    console.log(`[SmartSegmentation] 🔪 发现 ${codeBlocks.length} 个代码块, ${dashBlocks.length} 个分隔块`);
     
     const segments: string[] = [];
     let current = '';
@@ -219,6 +226,14 @@ export class SmartSegmentation {
     
     const isInCodeBlock = (pos: number): boolean => {
       return codeBlocks.some(block => pos >= block.start && pos < block.end);
+    };
+    
+    const isInDashBlock = (pos: number): boolean => {
+      return dashBlocks.some(block => pos >= block.start && pos < block.end);
+    };
+    
+    const getDashBlock = (pos: number): { start: number; end: number; content: string } | null => {
+      return dashBlocks.find(block => pos >= block.start && pos < block.end) || null;
     };
     
     const findQuoteEnd = (start: number, quoteChar: string): number => {
@@ -312,7 +327,35 @@ export class SmartSegmentation {
             segments.push(this.removePeriod(current.trim()));
             current = '';
           }
-          segments.push(block.content);
+          let codeContent = block.content;
+          codeContent = codeContent.replace(/^```\w*\r?\n?/, '');
+          codeContent = codeContent.replace(/\r?\n?```$/, '');
+          codeContent = codeContent.trim();
+          if (codeContent) {
+            segments.push(codeContent);
+          }
+          i = block.end;
+          continue;
+        }
+        current += char;
+        i++;
+        continue;
+      }
+      
+      if (isInDashBlock(i)) {
+        const block = getDashBlock(i);
+        if (block) {
+          if (current.trim()) {
+            segments.push(this.removePeriod(current.trim()));
+            current = '';
+          }
+          let dashContent = block.content;
+          dashContent = dashContent.replace(/^---\r?\n?/, '');
+          dashContent = dashContent.replace(/\r?\n?---$/, '');
+          dashContent = dashContent.trim();
+          if (dashContent) {
+            segments.push(dashContent);
+          }
           i = block.end;
           continue;
         }

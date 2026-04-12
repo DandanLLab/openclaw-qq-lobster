@@ -28,7 +28,7 @@ import { getEmojiManager } from "./core/emoji/index.js";
 import { analyzeEmotion, getEmojiForEmotion, getReplyStyleSuggestion } from "./emotionAnalyzer.js";
 import { PFC } from "./core/brain/index.js";
 import { MemoryRetrieval } from "./core/memory/index.js";
-import { setCurrentMessageContext } from "./messageContext.js";
+import { setCurrentMessageContext, updateGroupContext, getGroupContext } from "./messageContext.js";
 import { getMessageQueueManager } from "./messageQueue.js";
 import {
   downloadImageToBase64,
@@ -47,7 +47,7 @@ import { pluginManager, type PluginContext } from "./plugins/index.js";
 import { handleAdminCommand } from "./admin-commands.js";
 import { triggerUpdateCheck } from "./update-checker.js";
 import { installGlobalInterceptor } from "./log-buffer.js";
-import { populateGroupMemberCache, getCachedMemberName, setCachedMemberName, clearMemberCache } from "./member-cache.js";
+import { populateGroupMemberCache, getCachedMemberName, setCachedMemberName, clearMemberCache, getCachedMemberInfo, getCachedGroupInfo, setCachedGroupInfo, populateGroupInfoCache } from "./member-cache.js";
 import { initRefIndexStore, recordRef, lookupRef, flushRefIndex } from "./ref-index-store.js";
 import { TypingKeepAlive } from "./typing-keepalive.js";
 import { UploadCache } from "./upload-cache.js";
@@ -1390,6 +1390,27 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
 
             const abortController = messageQueueManager.startProcessing(fromId);
 
+            let groupName: string | undefined;
+            let userRole: string | undefined;
+            let memberCount: number | undefined;
+
+            if (isGroup && groupId) {
+              const cachedGroupInfo = getCachedGroupInfo(String(groupId));
+              if (cachedGroupInfo) {
+                groupName = cachedGroupInfo.groupName;
+                memberCount = cachedGroupInfo.memberCount;
+              } else {
+                populateGroupInfoCache(client, groupId).catch(() => {});
+              }
+
+              const cachedMemberInfo = getCachedMemberInfo(String(groupId), String(userId));
+              if (cachedMemberInfo) {
+                userRole = cachedMemberInfo.role;
+              }
+
+              populateGroupMemberCache(client, groupId).catch(() => {});
+            }
+
             setCurrentMessageContext({
                 userId,
                 groupId: isGroup ? groupId : undefined,
@@ -1399,6 +1420,9 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                 accountId: account.accountId,
                 timestamp: event.time * 1000,
                 messageId: event.message_id,
+                groupName,
+                userRole,
+                memberCount,
             });
 
             let pfcReasoning: string | undefined;

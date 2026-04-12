@@ -778,7 +778,7 @@ function registerQQTools(api: OpenClawPluginApi) {
   api.registerTool({
     name: "qq_send_emoji_reaction",
     label: "QQ发送表情回应",
-    description: "对群消息发送表情回应（表情贴）。龙虾可以根据对话内容判断是否需要发送表情回应，比如对方说了有趣的话、感谢、夸奖等情况下可以发送👍等表情。只在群聊中有效。",
+    description: "对群消息发送表情回应（表情贴）。龙虾可以根据对话内容判断是否需要发送表情回应，比如对方说了有趣的话、感谢、夸奖等情况下可以发送👍等表情.只在群聊中有效。",
     parameters: Type.Object({
       emoji_id: Type.String({ description: "表情ID，如 128077 (👍)、128078 (👎)、128522 (😊) 等" }),
     }),
@@ -808,6 +808,233 @@ function registerQQTools(api: OpenClawPluginApi) {
       } catch (e: any) {
         return { 
           content: [{ type: "text", text: `发送表情回应失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_send_poke",
+    label: "QQ戳一戳",
+    description: "在QQ群中戳一戳指定用户。龙虾可以根据对话内容判断是否需要戳一戳，比如对方说了一些可爱的话、求关注、或者想互动的时候可以戳一戳。只在群聊中有效。",
+    parameters: Type.Object({
+      user_id: Type.Optional(Type.Number({ description: "要戳的用户ID（不填则戳当前对话用户）" })),
+    }),
+    async execute(_toolCallId, params) {
+      const client = getQQClient("default");
+      if (!client) {
+        return { content: [{ type: "text", text: "QQ客户端未连接" }], details: { success: false } };
+      }
+      
+      const ctx = getCurrentMessageContext();
+      if (!ctx || !ctx.isGroup) {
+        return { content: [{ type: "text", text: "当前不在群聊环境中，无法戳一戳" }], details: { success: false } };
+      }
+      
+      const targetUserId = params.user_id || ctx.userId;
+      const selfId = client.getSelfId?.();
+      
+      if (selfId && String(targetUserId) === String(selfId)) {
+        return { content: [{ type: "text", text: "戳自己？咱才不会做这种傻事呢！" }], details: { success: false } };
+      }
+      
+      try {
+        client.sendGroupPoke(ctx.groupId!, targetUserId);
+        console.log(`[QQ] 👆 龙虾主动戳一戳: 群${ctx.groupId} 用户${targetUserId}`);
+        return { 
+          content: [{ type: "text", text: `✅ 已戳一戳用户 ${targetUserId}` }], 
+          details: { success: true, user_id: targetUserId, group_id: ctx.groupId } 
+        };
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `戳一戳失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_send_like",
+    label: "QQ发送好友赞",
+    description: "给指定用户发送好友赞。可以用来表达喜欢或感谢。每个好友每天最多10次。",
+    parameters: Type.Object({
+      user_id: Type.Optional(Type.Number({ description: "要点赞的用户ID（不填则点赞当前对话用户）" })),
+      times: Type.Optional(Type.Number({ description: "点赞次数，默认1次，最多10次", minimum: 1, maximum: 10 })),
+    }),
+    async execute(_toolCallId, params) {
+      const client = getQQClient("default");
+      if (!client) {
+        return { content: [{ type: "text", text: "QQ客户端未连接" }], details: { success: false } };
+      }
+      
+      const ctx = getCurrentMessageContext();
+      const targetUserId = params.user_id || ctx?.userId;
+      
+      if (!targetUserId) {
+        return { content: [{ type: "text", text: "无法确定用户ID" }], details: { success: false } };
+      }
+      
+      const times = Math.min(Math.max(params.times || 1, 1), 10);
+      
+      try {
+        client.sendApi("send_like", { user_id: targetUserId, times });
+        console.log(`[QQ] 👍 龙虾发送好友赞: 用户${targetUserId}, ${times}次`);
+        return { 
+          content: [{ type: "text", text: `✅ 已给用户 ${targetUserId} 点赞 ${times} 次` }], 
+          details: { success: true, user_id: targetUserId, times } 
+        };
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `发送点赞失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_set_group_card",
+    label: "QQ设置群名片",
+    description: "设置群成员的群名片（群备注）。需要管理员权限。只在群聊中有效。",
+    parameters: Type.Object({
+      user_id: Type.Optional(Type.Number({ description: "要设置群名片的用户ID（不填则设置当前用户）" })),
+      card: Type.String({ description: "群名片内容，空字符串表示删除群名片" }),
+    }),
+    async execute(_toolCallId, params) {
+      const client = getQQClient("default");
+      if (!client) {
+        return { content: [{ type: "text", text: "QQ客户端未连接" }], details: { success: false } };
+      }
+      
+      const ctx = getCurrentMessageContext();
+      if (!ctx || !ctx.isGroup) {
+        return { content: [{ type: "text", text: "当前不在群聊环境中" }], details: { success: false } };
+      }
+      
+      const targetUserId = params.user_id || ctx.userId;
+      
+      try {
+        client.sendApi("set_group_card", { group_id: ctx.groupId, user_id: targetUserId, card: params.card || "" });
+        console.log(`[QQ] 📝 龙虾设置群名片: 群${ctx.groupId} 用户${targetUserId} -> ${params.card}`);
+        return { 
+          content: [{ type: "text", text: `✅ 已设置群名片: ${params.card || "(已删除)"}` }], 
+          details: { success: true, user_id: targetUserId, group_id: ctx.groupId } 
+        };
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `设置群名片失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_get_group_member_info",
+    label: "QQ获取群成员信息",
+    description: "获取群成员的详细信息，包括昵称、群名片、性别、年龄、角色等。只在群聊中有效。",
+    parameters: Type.Object({
+      user_id: Type.Optional(Type.Number({ description: "要获取信息的用户ID（不填则获取当前用户）" })),
+    }),
+    async execute(_toolCallId, params) {
+      const client = getQQClient("default");
+      if (!client) {
+        return { content: [{ type: "text", text: "QQ客户端未连接" }], details: { success: false } };
+      }
+      
+      const ctx = getCurrentMessageContext();
+      if (!ctx || !ctx.isGroup) {
+        return { content: [{ type: "text", text: "当前不在群聊环境中" }], details: { success: false } };
+      }
+      
+      const targetUserId = params.user_id || ctx.userId;
+      
+      try {
+        const result = await client.sendApiWithResponse("get_group_member_info", { group_id: ctx.groupId, user_id: targetUserId });
+        const info = result.data || result;
+        const summary = `群成员信息:
+- QQ号: ${info.user_id}
+- 昵称: ${info.nickname}
+- 群名片: ${info.card || "(无)"}
+- 性别: ${info.sex === 'male' ? '男' : info.sex === 'female' ? '女' : '未知'}
+- 年龄: ${info.age || "未知"}
+- 角色: ${info.role === 'owner' ? '群主' : info.role === 'admin' ? '管理员' : '成员'}
+- 入群时间: ${info.join_time ? new Date(info.join_time * 1000).toLocaleString() : "未知"}`;
+        return { 
+          content: [{ type: "text", text: summary }], 
+          details: { success: true, info } 
+        };
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `获取群成员信息失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_get_group_info",
+    label: "QQ获取群信息",
+    description: "获取群的基本信息，包括群名、成员数、群容量等。只在群聊中有效。",
+    parameters: Type.Object({}),
+    async execute(_toolCallId, params) {
+      const client = getQQClient("default");
+      if (!client) {
+        return { content: [{ type: "text", text: "QQ客户端未连接" }], details: { success: false } };
+      }
+      
+      const ctx = getCurrentMessageContext();
+      if (!ctx || !ctx.isGroup) {
+        return { content: [{ type: "text", text: "当前不在群聊环境中" }], details: { success: false } };
+      }
+      
+      try {
+        const result = await client.sendApiWithResponse("get_group_info", { group_id: ctx.groupId });
+        const info = result.data || result;
+        const summary = `群信息:
+- 群号: ${info.group_id}
+- 群名: ${info.group_name}
+- 成员数: ${info.member_count}
+- 群容量: ${info.max_member_count}`;
+        return { 
+          content: [{ type: "text", text: summary }], 
+          details: { success: true, info } 
+        };
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `获取群信息失败: ${e.message}` }], 
+          details: { success: false, error: e.message } 
+        };
+      }
+    },
+  });
+
+  api.registerTool({
+    name: "qq_delete_msg",
+    label: "QQ撤回消息",
+    description: "撤回指定的消息。只能撤回2分钟内自己发送的消息，或管理员可以撤回群成员的消息。需要消息ID。",
+    parameters: Type.Object({
+      message_id: Type.Number({ description: "要撤回的消息ID" }),
+    }),
+    async execute(_toolCallId, params) {
+      const client = getQQClient("default");
+      if (!client) {
+        return { content: [{ type: "text", text: "QQ客户端未连接" }], details: { success: false } };
+      }
+      
+      try {
+        client.sendApi("delete_msg", { message_id: params.message_id });
+        console.log(`[QQ] 🗑️ 龙虾撤回消息: ${params.message_id}`);
+        return { 
+          content: [{ type: "text", text: `✅ 已撤回消息 ${params.message_id}` }], 
+          details: { success: true, message_id: params.message_id } 
+        };
+      } catch (e: any) {
+        return { 
+          content: [{ type: "text", text: `撤回消息失败: ${e.message}` }], 
           details: { success: false, error: e.message } 
         };
       }

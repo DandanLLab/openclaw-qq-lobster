@@ -7,12 +7,23 @@ interface MessageContext {
   accountId: string;
   timestamp: number;
   messageId?: string | number;
+  groupName?: string;
+  userRole?: string;
+  memberCount?: number;
+}
+
+interface GroupContext {
+  groupId: number;
+  groupName: string;
+  memberCount: number;
+  lastActiveTime: number;
 }
 
 class MessageContextManager {
   private static instance: MessageContextManager | null = null;
   private currentContext: MessageContext | null = null;
   private contextHistory: Map<string, MessageContext> = new Map();
+  private groupContextCache: Map<number, GroupContext> = new Map();
 
   private constructor() {}
 
@@ -29,6 +40,10 @@ class MessageContextManager {
       ? `group:${context.groupId}` 
       : `user:${context.userId}`;
     this.contextHistory.set(key, context);
+    
+    if (context.isGroup && context.groupId && context.groupName) {
+      this.updateGroupContext(context.groupId, context.groupName, context.memberCount);
+    }
   }
 
   getContext(): MessageContext | null {
@@ -43,8 +58,35 @@ class MessageContextManager {
     return this.contextHistory.get(`user:${userId}`);
   }
 
+  updateGroupContext(groupId: number, groupName: string, memberCount?: number): void {
+    const existing = this.groupContextCache.get(groupId);
+    this.groupContextCache.set(groupId, {
+      groupId,
+      groupName: groupName || existing?.groupName || '',
+      memberCount: memberCount ?? existing?.memberCount ?? 0,
+      lastActiveTime: Date.now()
+    });
+  }
+
+  getGroupContext(groupId: number): GroupContext | undefined {
+    return this.groupContextCache.get(groupId);
+  }
+
+  getGroupContextCache(): Map<number, GroupContext> {
+    return this.groupContextCache;
+  }
+
   clearContext(): void {
     this.currentContext = null;
+  }
+
+  clearAllContexts(): void {
+    this.currentContext = null;
+    this.contextHistory.clear();
+  }
+
+  clearGroupContextCache(): void {
+    this.groupContextCache.clear();
   }
 }
 
@@ -60,4 +102,12 @@ export function getCurrentMessageContext(): MessageContext | null {
   return MessageContextManager.getInstance().getContext();
 }
 
-export type { MessageContext };
+export function updateGroupContext(groupId: number, groupName: string, memberCount?: number): void {
+  MessageContextManager.getInstance().updateGroupContext(groupId, groupName, memberCount);
+}
+
+export function getGroupContext(groupId: number): GroupContext | undefined {
+  return MessageContextManager.getInstance().getGroupContext(groupId);
+}
+
+export type { MessageContext, GroupContext };

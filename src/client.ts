@@ -630,6 +630,14 @@ export class OneBotClient extends EventEmitter {
     }
   }
 
+  sendApi(action: string, params: any = {}): void {
+    this.send(action, params);
+  }
+
+  async sendApiWithResponse(action: string, params: any = {}): Promise<any> {
+    return this.sendWithResponse(action, params);
+  }
+
   disconnect() {
     this.cleanup();
     if (this.reverseWsServer) {
