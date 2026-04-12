@@ -544,8 +544,8 @@ export class OneBotClient extends EventEmitter {
     this.send("set_group_kick", { group_id: groupId, user_id: userId, reject_add_request: rejectAddRequest });
   }
 
-  setGroupReaction(groupId: number, messageId: string, code: string) {
-    this.send("set_group_reaction", { group_id: groupId, message_id: messageId, code });
+  setGroupReaction(groupId: number, messageId: string, emojiId: string) {
+    this.send("set_msg_emoji_like", { message_id: messageId, emoji_id: emojiId, set: true });
   }
 
   markGroupMsgAsRead(groupId: number) {
