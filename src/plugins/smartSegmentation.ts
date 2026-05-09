@@ -67,7 +67,7 @@ export class SmartSegmentation {
       /^Something went wrong while processing your request/i,
       /^Please try again, or use \/new to start a fresh session/i,
       /NO_REPLY/i,
-      /^terminated$/i,
+      /^.*terminated.*/i,
       /^GitHub\s*-\s*.+·\s*GitHub\s*$/i,
       /Contribute to .+ development by creating an account on GitHub/i,
       /^https?:\/\/github\.com\/[^\s]+\.\.\.$/i
@@ -84,7 +84,7 @@ export class SmartSegmentation {
     filtered = filtered.replace(/Something went wrong while processing your request[。\n]*/gi, '');
     filtered = filtered.replace(/Please try again, or use \/new to start a fresh session[。\n]*/gi, '');
     filtered = filtered.replace(/\bterminated\b[。\n]*/gi, '');
-    filtered = filtered.replace(/^terminated$/gim, '');
+    filtered = filtered.replace(/.*terminated.*/gim, '');
     filtered = filtered.replace(/GitHub\s*-\s*[^·]+·\s*GitHub[\s\n]*/gi, '');
     filtered = filtered.replace(/Contribute to [^\n]+development by creating an account on GitHub[\s\n]*/gi, '');
     filtered = filtered.replace(/`https?:\/\/github\.com\/[^\s]+\.\.\.`[\s\n]*/gi, '');
@@ -151,7 +151,7 @@ export class SmartSegmentation {
       console.log(`[SmartSegmentation] ⚠️ 文本为空，跳过分段`);
       return false;
     }
-    const segmentChars = ['。', '！', '？', '；', '～', '…', '!', '?', ';', '~'];
+    const segmentChars = ['。', '！', '？', '…', '!', '?'];
     const hasSegmentChar = segmentChars.some(char => text.includes(char));
     console.log(`[SmartSegmentation] 🔍 包含分段字符: ${hasSegmentChar}`);
     return hasSegmentChar;
@@ -345,7 +345,7 @@ export class SmartSegmentation {
       
       current += char;
       
-      const segmentChars = ['。', '！', '？', '；', '～', '!', '?', ';', '~'];
+      const segmentChars = ['。', '！', '？', '!', '?'];
       const isEllipsis = char === '…';
       
       if (isInQuote(i) || isInBracket(i)) {
@@ -488,7 +488,7 @@ export class SmartSegmentation {
       return [];
     }
 
-    const segmentChars = ['。', '！', '？', '；', '～', '…', '!', '?', ';', '~'];
+    const segmentChars = ['。', '！', '？', '…', '!', '?'];
     const hasSegmentChar = segmentChars.some(char => visibleText.includes(char));
     
     if (!hasSegmentChar) {

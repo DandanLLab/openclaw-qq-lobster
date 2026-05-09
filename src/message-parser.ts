@@ -185,6 +185,7 @@ export function stripMarkdown(text: string): string {
     .replace(/\[(.*?)\]\(.*?\)/g, "$1")
     .replace(/^\s*>\s+(.*)/gm, "▎$1")
     .replace(/^\|.*\|$/gm, (m) => m.replace(/\|/g, " ").trim())
+    .replace(/---[\s\S]---/, "")
     .replace(/^[\-\*]\s+/gm, "• ");
 }
 
