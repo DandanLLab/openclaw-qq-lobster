@@ -28,15 +28,18 @@ interface EmojiRecord {
   isDeleted: boolean;
 }
 
-const EMOJI_EMOTION_PROMPT = `这是一个聊天场景中的表情包描述：'{description}'
+const EMOJI_EMOTION_PROMPT = `你是一个表情包情感分析器。你必须且只能输出一个合法的JSON对象，不要输出任何其他文字、解释或markdown。
 
-请你识别这个表情包的含义和适用场景，从互联网梗、meme的角度分析其幽默和讽刺意味。
-请严格按以下JSON格式输出，不要输出任何其他内容：
-{
-  "emotions": ["情感1", "情感2", "情感3"]
-}
+表情包描述：'{description}'
 
-emotions要求：1-3个简短词汇，每个不超过6个字，如"害羞""得意""无语""暴怒""撒娇""尴尬""震惊""委屈""傲娇""憨笑"`;
+从互联网梗、meme角度分析其情感，输出JSON：
+
+{"emotions":["情感1","情感2"]}
+
+规则：
+1. 必须填写1-3个简短情感词，每个不超过6字
+2. 参考词汇："害羞""得意""无语""暴怒""撒娇""尴尬""震惊""委屈""傲娇""憨笑""困惑""疲惫""自嘲""无奈""呆萌""开心""悲伤""愤怒""恐惧""兴奋"
+3. 只输出JSON，不要输出任何其他内容`;
 
 export class EmojiManager {
   private static instance: EmojiManager | null = null;
@@ -166,12 +169,42 @@ export class EmojiManager {
       const hash = this.calculateFileHash(fullPath);
       const cached = await getCachedDescription(hash);
 
+      let emotionTags = cached?.emotionTags || [];
+      const desc = cached?.description || "";
+      if (emotionTags.length === 0 && desc.length > 0) {
+        const emotionMap: Record<string, string[]> = {
+          "困惑": ["困惑", "迷茫", "懵", "不解", "茫然"],
+          "震惊": ["震惊", "惊讶", "意外", "难以置信"],
+          "开心": ["开心", "高兴", "快乐", "愉快", "哈哈"],
+          "悲伤": ["悲伤", "难过", "伤心", "哭"],
+          "愤怒": ["愤怒", "生气", "火大", "烦"],
+          "尴尬": ["尴尬", "无语", "汗"],
+          "疲惫": ["疲惫", "累", "困", "无力"],
+          "撒娇": ["撒娇", "害羞", "傲娇", "亲昵"],
+          "得意": ["得意", "狡黠", "自信"],
+          "自嘲": ["自嘲", "无奈", "苦笑"],
+          "治愈": ["治愈", "温馨", "温柔", "宠溺", "可爱"],
+          "恐惧": ["恐惧", "害怕", "紧张"],
+          "兴奋": ["兴奋", "激动", "期待"],
+          "爱": ["爱", "喜欢", "心动"],
+        };
+        for (const [emotion, keywords] of Object.entries(emotionMap)) {
+          if (keywords.some(kw => desc.includes(kw))) {
+            emotionTags.push(emotion);
+            if (emotionTags.length >= 3) break;
+          }
+        }
+        if (emotionTags.length > 0) {
+          await cacheDescription(hash, desc, "emoji", emotionTags);
+        }
+      }
+
       const record: EmojiRecord = {
         hash,
         fullPath,
         filename,
-        description: cached?.description || filename.replace(ext, ""),
-        emotion: cached?.emotionTags || [],
+        description: desc || filename.replace(ext, ""),
+        emotion: emotionTags,
         usageCount: 0,
         lastUsedTime: Date.now(),
         registerTime: fs.statSync(fullPath).mtimeMs,

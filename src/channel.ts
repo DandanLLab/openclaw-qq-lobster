@@ -966,8 +966,36 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                                                 const hash = computeImageHash(base64);
                                                 
                                                 if (imageResult && imageResult.type !== "emoji") {
-                                                  await cacheDescription(hash, imageResult.description, "emoji", imageResult.emotionTags);
-                                                  console.log(`[QQ] 🎭 更新缓存类型为表情包: ${hash.substring(0, 8)}...`);
+                                                  const desc = imageResult.description || "";
+                                                  const emojiIndicators = ["表情包", "emoji", "meme", "Q版", "萌系", "卡通形象", "动漫风格表情"];
+                                                  let tags = imageResult.emotionTags;
+                                                  if (!tags || tags.length === 0) {
+                                                    const emotionMap: Record<string, string[]> = {
+                                                      "困惑": ["困惑", "迷茫", "懵", "不解", "茫然"],
+                                                      "震惊": ["震惊", "惊讶", "意外", "难以置信"],
+                                                      "开心": ["开心", "高兴", "快乐", "愉快", "哈哈"],
+                                                      "悲伤": ["悲伤", "难过", "伤心", "哭"],
+                                                      "愤怒": ["愤怒", "生气", "火大", "烦"],
+                                                      "尴尬": ["尴尬", "无语", "汗"],
+                                                      "疲惫": ["疲惫", "累", "困", "无力"],
+                                                      "撒娇": ["撒娇", "害羞", "傲娇", "亲昵"],
+                                                      "得意": ["得意", "狡黠", "自信"],
+                                                      "自嘲": ["自嘲", "无奈", "苦笑"],
+                                                      "治愈": ["治愈", "温馨", "温柔", "宠溺", "可爱"],
+                                                      "恐惧": ["恐惧", "害怕", "紧张"],
+                                                      "兴奋": ["兴奋", "激动", "期待"],
+                                                      "爱": ["爱", "喜欢", "心动"],
+                                                    };
+                                                    tags = [];
+                                                    for (const [emotion, keywords] of Object.entries(emotionMap)) {
+                                                      if (keywords.some(kw => desc.includes(kw))) {
+                                                        tags.push(emotion);
+                                                        if (tags.length >= 3) break;
+                                                      }
+                                                    }
+                                                  }
+                                                  await cacheDescription(hash, desc, "emoji", tags && tags.length > 0 ? tags : undefined);
+                                                  console.log(`[QQ] 🎭 更新缓存类型为表情包: ${hash.substring(0, 8)}... 情绪: [${tags?.join(", ") || ""}]`);
                                                 } else if (!imageResult) {
                                                   await cacheDescription(hash, "[表情包]", "emoji", []);
                                                 }

@@ -271,33 +271,43 @@ export interface ImageProcessResult {
   hash: string;
 }
 
-const VLM_IMAGE_PROMPT = `分析这张图片，请严格按以下JSON格式输出，不要输出任何其他内容：
-{
-  "isEmoji": true或false,
-  "description": "图片内容描述",
-  "emotions": ["情感1", "情感2"]
-}
+const VLM_IMAGE_PROMPT = `你是一个图片分析器。你必须且只能输出一个合法的JSON对象，不要输出任何其他文字、解释或markdown。
 
-【判断规则】
-- isEmoji为true：卡通/动漫/Q版形象、表情包风格图片、搞笑吐槽类图片、萌系可爱图片、简洁配图表情、有明确情感表达的梗图
-- isEmoji为false：手机/电脑截图、真人照片、风景照、文档/大量文字、新闻资讯、复杂海报/广告、商品展示、代码截图、聊天记录截图、APP界面截图
-- emotions：仅当isEmoji为true时填写，用1-3个简短词汇概括核心情感（如"害羞""得意""无语""暴怒""撒娇"），从互联网梗/meme角度分析；isEmoji为false时填空数组`;
+判断这张图片是否为表情包，然后输出JSON：
 
-const VLM_EMOJI_PROMPT = `分析这个表情包，请严格按以下JSON格式输出，不要输出任何其他内容：
-{
-  "isEmoji": true,
-  "description": "表情包内容描述，从互联网梗、meme的角度分析",
-  "emotions": ["情感1", "情感2", "情感3"]
-}
+【表情包(isEmoji=true)】卡通/动漫/Q版形象、表情包风格、搞笑吐槽、萌系可爱、简洁配图表情、有情感表达的梗图
+【非表情包(isEmoji=false)】手机/电脑截图、真人照片、风景照、文档/大量文字、新闻资讯、海报/广告、商品展示、代码截图、聊天记录截图、APP界面截图
 
-emotions要求：用1-3个简短词汇（每个不超过6个字）概括核心情感，从互联网梗/meme角度分析，如"害羞""得意""无语""暴怒""撒娇""尴尬""震惊""委屈""傲娇""憨笑"`;
+输出格式（严格遵守）：
+{"isEmoji":true,"description":"图片内容描述","emotions":["情感1","情感2"]}
+或
+{"isEmoji":false,"description":"图片内容描述","emotions":[]}
 
-const VLM_PLAIN_IMAGE_PROMPT = `分析这张图片，请严格按以下JSON格式输出，不要输出任何其他内容：
-{
-  "isEmoji": true或false,
-  "description": "图片内容简洁描述",
-  "emotions": []
-}`;
+规则：
+1. isEmoji为true时，emotions必须填写1-3个简短情感词（每个不超过6字），从互联网梗/meme角度分析，如"害羞""得意""无语""暴怒""撒娇""尴尬""震惊""委屈""傲娇""憨笑""困惑""疲惫""自嘲"
+2. isEmoji为false时，emotions必须为空数组[]
+3. description必须简洁描述图片内容
+4. 只输出JSON，不要输出任何其他内容`;
+
+const VLM_EMOJI_PROMPT = `你是一个表情包分析器。你必须且只能输出一个合法的JSON对象，不要输出任何其他文字、解释或markdown。
+
+分析这个表情包并输出JSON：
+
+{"isEmoji":true,"description":"表情包内容描述","emotions":["情感1","情感2","情感3"]}
+
+规则：
+1. isEmoji必须为true
+2. description：从互联网梗、meme角度描述表情包内容和含义
+3. emotions：必须填写1-3个简短情感词（每个不超过6字），从互联网梗/meme角度分析，如"害羞""得意""无语""暴怒""撒娇""尴尬""震惊""委屈""傲娇""憨笑""困惑""疲惫""自嘲""无奈""呆萌"
+4. 只输出JSON，不要输出任何其他内容`;
+
+const VLM_PLAIN_IMAGE_PROMPT = `你是一个图片分析器。你必须且只能输出一个合法的JSON对象，不要输出任何其他文字、解释或markdown。
+
+{"isEmoji":true或false,"description":"图片内容简洁描述","emotions":[]}
+
+规则：
+1. isEmoji为true时emotions必须填写情感词，为false时必须为空数组[]
+2. 只输出JSON，不要输出任何其他内容`;
 
 const EMOTION_KEYWORD_MAP: Record<string, string[]> = {
   "困惑": ["困惑", "迷茫", "懵", "不解", "茫然", "不懂", "什么意思"],
@@ -626,29 +636,18 @@ export async function initializeImageManager(): Promise<void> {
   await manager.initialize();
 }
 
-const EMOJI_CHECK_PROMPT = `判断这张图片是否适合保存为表情包，请严格按以下JSON格式输出，不要输出任何其他内容：
-{
-  "isEmoji": true或false,
-  "reason": "简短原因"
-}
+const EMOJI_CHECK_PROMPT = `你是一个表情包检测器。你必须且只能输出一个合法的JSON对象，不要输出任何其他文字、解释或markdown。
 
-【表情包特征 isEmoji=true】
-- 可爱、萌系的卡通形象
-- 表情包风格的图片（有情感表达）
-- 搞笑、吐槽类的图片
-- 动漫/二次元风格的表情图
-- 简洁的配图表情
+判断这张图片是否适合保存为表情包：
 
-【不是表情包 isEmoji=false】
-- 手机/电脑截图（有UI元素、界面）
-- 真人照片
-- 风景照
-- 文档/大量文字的图片
-- 新闻/资讯类图片
-- 复杂的海报/广告
-- 聊天记录截图
-- APP界面截图
-- 代码截图`;
+{"isEmoji":true,"reason":"简短原因"}
+或
+{"isEmoji":false,"reason":"简短原因"}
+
+【表情包 isEmoji=true】可爱萌系卡通形象、表情包风格（有情感表达）、搞笑吐槽、动漫/二次元风格表情图、简洁配图表情
+【非表情包 isEmoji=false】手机/电脑截图、真人照片、风景照、文档/大量文字、新闻资讯、海报/广告、聊天记录截图、APP界面截图、代码截图
+
+只输出JSON，不要输出任何其他内容`;
 
 function isLikelyEmojiBySize(base64Data: string): boolean {
   try {
