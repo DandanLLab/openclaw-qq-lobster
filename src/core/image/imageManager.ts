@@ -462,7 +462,23 @@ export async function processImage(
                   }
                 }
               } catch (parseError) {
-                console.log(`[QQ] VLM输出非JSON格式，使用原始文本`);
+                console.log(`[QQ] VLM输出非JSON格式，从描述文本检测表情包`);
+              }
+
+              if (type !== "emoji") {
+                const emojiIndicators = ["表情包", "emoji", "meme", "Q版", "萌系", "卡通形象", "动漫风格表情"];
+                const lowerContent = content.toLowerCase();
+                if (emojiIndicators.some(kw => lowerContent.includes(kw))) {
+                  type = "emoji";
+                  console.log(`[QQ] 🎭 描述文本检测到表情包关键词，更新类型为emoji`);
+                }
+              }
+
+              if (type === "emoji" && (!emotionTags || emotionTags.length === 0)) {
+                emotionTags = extractEmotionFromDescription(content);
+                if (emotionTags.length > 0) {
+                  console.log(`[QQ] 🎭 从描述提取情绪标签: [${emotionTags.join(", ")}]`);
+                }
               }
               break;
             }
@@ -526,8 +542,19 @@ export async function processImage(
       }
 
       if (description) {
+        if (type !== "emoji") {
+          const emojiIndicators = ["表情包", "emoji", "meme", "Q版", "萌系", "卡通形象", "动漫风格表情"];
+          const lowerDesc = description.toLowerCase();
+          if (emojiIndicators.some(kw => lowerDesc.includes(kw))) {
+            type = "emoji";
+            console.log(`[QQ] 🎭 描述文本检测到表情包关键词，更新类型为emoji`);
+          }
+        }
         if (type === "emoji" && (!emotionTags || emotionTags.length === 0)) {
           emotionTags = extractEmotionFromDescription(description);
+          if (emotionTags.length > 0) {
+            console.log(`[QQ] 🎭 从描述提取情绪标签: [${emotionTags.join(", ")}]`);
+          }
         }
         await cacheDescription(hash, description, type, emotionTags);
       }
@@ -551,10 +578,17 @@ export async function processImage(
 
 export function formatImageDescription(result: ImageProcessResult): string {
   if (result.type === "emoji") {
+    const parts: string[] = [];
     if (result.emotionTags && result.emotionTags.length > 0) {
-      return `[表情包：${result.emotionTags.join("，")}]`;
+      parts.push(`情绪：${result.emotionTags.join("、")}`);
     }
-    return `[表情包：${result.description}]`;
+    if (result.description) {
+      const shortDesc = result.description.length > 80
+        ? result.description.substring(0, 80) + "..."
+        : result.description;
+      parts.push(shortDesc);
+    }
+    return parts.length > 0 ? `[表情包：${parts.join(" | ")}]` : "[表情包]";
   }
   return `[图片：${result.description}]`;
 }
@@ -663,7 +697,14 @@ export async function checkIfEmoji(
         return true;
       }
       
-      console.log(`[QQ] 🎭 表情包检测: ❌ 图片识别结果类型非表情包`);
+      const desc = imageResult.description || "";
+      const emojiIndicators = ["表情包", "emoji", "meme", "Q版", "萌系", "卡通形象", "动漫风格表情"];
+      if (emojiIndicators.some(kw => desc.toLowerCase().includes(kw))) {
+        console.log(`[QQ] 🎭 表情包检测: ✅ 描述文本包含表情包关键词`);
+        return true;
+      }
+      
+      console.log(`[QQ] 🎭 表情包检测: ❌ 不是表情包`);
       return false;
     }
     
