@@ -37,6 +37,8 @@ import {
   computeImageHash,
   checkIfEmoji,
   detectImageFormat,
+  cacheDescription,
+  getCachedDescription,
 } from "./core/image/imageManager.js";
 import {
   callWithModelRotation,
@@ -961,11 +963,19 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                                         const isEmoji = await checkIfEmoji(base64, runtime, skipVLM, imageResult || undefined);
                                         if (isEmoji) {
                                             try {
-                                                const emojiDir = path.join(process.cwd(), "data", "emoji");
+                                                const hash = computeImageHash(base64);
+                                                
+                                                if (imageResult && imageResult.type !== "emoji") {
+                                                  await cacheDescription(hash, imageResult.description, "emoji", imageResult.emotionTags);
+                                                  console.log(`[QQ] 🎭 更新缓存类型为表情包: ${hash.substring(0, 8)}...`);
+                                                } else if (!imageResult) {
+                                                  await cacheDescription(hash, "[表情包]", "emoji", []);
+                                                }
+                                                
+                                                const emojiDir = cfg?.channels?.qq?.emojiDir || (cfg as any)?.emoji?.emojiDir || path.join(process.cwd(), ".openclaw", "data", "emoji");
                                                 if (!fsSync.existsSync(emojiDir)) {
                                                    fsSync.mkdirSync(emojiDir, { recursive: true });
                                                 }
-                                                const hash = computeImageHash(base64);
                                                 const detectedFormat = detectImageFormat(base64);
                                                 const ext = detectedFormat === "gif" ? "gif" : 
                                                            detectedFormat === "apng" ? "png" : 
