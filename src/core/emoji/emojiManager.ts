@@ -30,9 +30,13 @@ interface EmojiRecord {
 
 const EMOJI_EMOTION_PROMPT = `这是一个聊天场景中的表情包描述：'{description}'
 
-请你识别这个表情包的含义和适用场景，给我简短的描述，每个描述不要超过15个字
-你可以关注其幽默和讽刺意味，动用贴吧，微博，小红书的知识，必须从互联网梗,meme的角度去分析
-请直接输出描述，不要出现任何其他内容，如果有多个描述，可以用逗号分隔`;
+请你识别这个表情包的含义和适用场景，从互联网梗、meme的角度分析其幽默和讽刺意味。
+请严格按以下JSON格式输出，不要输出任何其他内容：
+{
+  "emotions": ["情感1", "情感2", "情感3"]
+}
+
+emotions要求：1-3个简短词汇，每个不超过6个字，如"害羞""得意""无语""暴怒""撒娇""尴尬""震惊""委屈""傲娇""憨笑"`;
 
 export class EmojiManager {
   private static instance: EmojiManager | null = null;
@@ -46,9 +50,11 @@ export class EmojiManager {
 
   private constructor(config?: any) {
     this.config = config || {};
-    this.emojiDir = config?.emoji?.emojiDir || path.join(process.cwd(), "data", "emoji");
-    this.registeredDir = config?.emoji?.registeredDir || path.join(process.cwd(), "data", "emoji_registered");
-    this.maxEmojiNum = config?.emoji?.maxRegNum || 100;
+    const qqEmoji = config?.channels?.qq || config?.emoji || {};
+    const openclawRoot = path.resolve(process.cwd(), ".openclaw");
+    this.emojiDir = qqEmoji.emojiDir || config?.emoji?.emojiDir || path.join(openclawRoot, "data", "emoji");
+    this.registeredDir = qqEmoji.registeredDir || config?.emoji?.registeredDir || path.join(openclawRoot, "data", "emoji_registered");
+    this.maxEmojiNum = qqEmoji.maxRegNum || config?.emoji?.maxRegNum || 100;
   }
 
   static getInstance(config?: any): EmojiManager {
@@ -194,15 +200,54 @@ export class EmojiManager {
       return null;
     }
 
+    const inputWords = textEmotion.split(/[\s,，、]+/).filter(w => w.length > 0);
+
     const scored = validEmojis.map(emoji => {
       let maxSimilarity = 0;
       let bestEmotion = "";
 
-      for (const emotion of emoji.emotion) {
-        const similarity = this.calculateSimilarity(textEmotion, emotion);
-        if (similarity > maxSimilarity) {
-          maxSimilarity = similarity;
-          bestEmotion = emotion;
+      if (emoji.emotion.length === 0) {
+        const descWords = emoji.description
+          .replace(/[^\u4e00-\u9fa5a-zA-Z0-9\s]/g, "")
+          .split(/[\s,，。！？、；：""''（）【】《》]+/)
+          .filter(w => w.length > 0);
+        for (const inputWord of inputWords) {
+          for (const descWord of descWords) {
+            if (descWord.includes(inputWord) || inputWord.includes(descWord)) {
+              const sim = Math.min(inputWord.length, descWord.length) / Math.max(inputWord.length, descWord.length);
+              if (sim > maxSimilarity) {
+                maxSimilarity = sim;
+                bestEmotion = descWord;
+              }
+            }
+          }
+        }
+      } else {
+        for (const emotion of emoji.emotion) {
+          for (const inputWord of inputWords) {
+            const similarity = this.calculateSimilarity(inputWord, emotion);
+            if (similarity > maxSimilarity) {
+              maxSimilarity = similarity;
+              bestEmotion = emotion;
+            }
+          }
+          if (maxSimilarity < 0.5) {
+            const descWords = emoji.description
+              .replace(/[^\u4e00-\u9fa5a-zA-Z0-9\s]/g, "")
+              .split(/[\s,，。！？、；：""''（）【】《》]+/)
+              .filter(w => w.length > 0);
+            for (const inputWord of inputWords) {
+              for (const descWord of descWords) {
+                if (descWord.includes(inputWord) || inputWord.includes(descWord)) {
+                  const sim = Math.min(inputWord.length, descWord.length) / Math.max(inputWord.length, descWord.length) * 0.8;
+                  if (sim > maxSimilarity) {
+                    maxSimilarity = sim;
+                    bestEmotion = emotion;
+                  }
+                }
+              }
+            }
+          }
         }
       }
 
@@ -211,14 +256,31 @@ export class EmojiManager {
 
     scored.sort((a, b) => b.similarity - a.similarity);
 
-    const topEmojis = scored.slice(0, Math.min(10, scored.length));
-    const selected = topEmojis[Math.floor(Math.random() * topEmojis.length)];
+    const minSimilarity = 0.3;
+    const qualified = scored.filter(s => s.similarity >= minSimilarity);
+    if (qualified.length === 0) {
+      return null;
+    }
+
+    const topEmojis = qualified.slice(0, Math.min(5, qualified.length));
+    const weights = topEmojis.map((_, i) => Math.max(1, topEmojis.length - i));
+    const totalWeight = weights.reduce((a, b) => a + b, 0);
+    let random = Math.random() * totalWeight;
+    let selectedIdx = 0;
+    for (let i = 0; i < weights.length; i++) {
+      random -= weights[i];
+      if (random <= 0) {
+        selectedIdx = i;
+        break;
+      }
+    }
+    const selected = topEmojis[selectedIdx];
 
     if (selected) {
       selected.emoji.usageCount++;
       selected.emoji.lastUsedTime = Date.now();
 
-      console.log(`[EmojiManager] 为[${textEmotion}]找到表情包: ${selected.emoji.filename}`);
+      console.log(`[EmojiManager] 为[${textEmotion}]找到表情包: ${selected.emoji.filename} (相似度: ${selected.similarity.toFixed(2)}, 情绪: ${selected.bestEmotion})`);
 
       return {
         path: selected.emoji.fullPath,
@@ -376,16 +438,23 @@ export class EmojiManager {
         const emotionResult = await this.callLLM(emotionPrompt, 0.7);
 
         if (emotionResult.success && emotionResult.content) {
-          emotions = emotionResult.content
-            .replace(/，/g, ",")
-            .split(",")
-            .map(e => e.trim())
-            .filter(e => e.length > 0 && e.length <= 15);
-
-          if (emotions.length > 5) {
-            emotions = this.shuffleArray(emotions).slice(0, 3);
-          } else if (emotions.length > 2) {
-            emotions = this.shuffleArray(emotions).slice(0, 2);
+          try {
+            const jsonMatch = emotionResult.content.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+              const parsed = JSON.parse(jsonMatch[0]);
+              if (Array.isArray(parsed.emotions)) {
+                emotions = parsed.emotions
+                  .filter((e: any) => typeof e === "string" && e.length > 0 && e.length <= 15)
+                  .slice(0, 3);
+              }
+            }
+          } catch {
+            emotions = emotionResult.content
+              .replace(/，/g, ",")
+              .split(",")
+              .map(e => e.trim())
+              .filter(e => e.length > 0 && e.length <= 6)
+              .slice(0, 3);
           }
         }
       }

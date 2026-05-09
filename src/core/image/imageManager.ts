@@ -271,7 +271,33 @@ export interface ImageProcessResult {
   hash: string;
 }
 
-const VLM_IMAGE_PROMPT = `这是一个图片，请详细描述图片的内容。如果是表情包，请描述表情包表达的情感和含义，并用1-2个词概括核心情感。`;
+const VLM_IMAGE_PROMPT = `分析这张图片，请严格按以下JSON格式输出，不要输出任何其他内容：
+{
+  "isEmoji": true或false,
+  "description": "图片内容描述",
+  "emotions": ["情感1", "情感2"]
+}
+
+【判断规则】
+- isEmoji为true：卡通/动漫/Q版形象、表情包风格图片、搞笑吐槽类图片、萌系可爱图片、简洁配图表情、有明确情感表达的梗图
+- isEmoji为false：手机/电脑截图、真人照片、风景照、文档/大量文字、新闻资讯、复杂海报/广告、商品展示、代码截图、聊天记录截图、APP界面截图
+- emotions：仅当isEmoji为true时填写，用1-3个简短词汇概括核心情感（如"害羞""得意""无语""暴怒""撒娇"），从互联网梗/meme角度分析；isEmoji为false时填空数组`;
+
+const VLM_EMOJI_PROMPT = `分析这个表情包，请严格按以下JSON格式输出，不要输出任何其他内容：
+{
+  "isEmoji": true,
+  "description": "表情包内容描述，从互联网梗、meme的角度分析",
+  "emotions": ["情感1", "情感2", "情感3"]
+}
+
+emotions要求：用1-3个简短词汇（每个不超过6个字）概括核心情感，从互联网梗/meme角度分析，如"害羞""得意""无语""暴怒""撒娇""尴尬""震惊""委屈""傲娇""憨笑"`;
+
+const VLM_PLAIN_IMAGE_PROMPT = `分析这张图片，请严格按以下JSON格式输出，不要输出任何其他内容：
+{
+  "isEmoji": true或false,
+  "description": "图片内容简洁描述",
+  "emotions": []
+}`;
 
 export async function processImage(
   base64Data: string,
@@ -282,7 +308,7 @@ export async function processImage(
   const hash = computeImageHash(base64Data);
   const format = detectImageFormat(base64Data);
   const isEmoji = isEmojiImage(subType);
-  const type = isEmoji ? "emoji" : "image";
+  let type: "emoji" | "image" = isEmoji ? "emoji" : "image";
 
   const cached = await getCachedDescription(hash);
   if (cached) {
@@ -305,9 +331,9 @@ export async function processImage(
       let prompt = customPrompt;
       if (!prompt) {
         if (isEmoji) {
-          prompt = "这是一个表情包，请详细描述表情包所表达的情感和内容，从互联网梗、meme的角度分析。用1-2个词概括核心情感。";
+          prompt = VLM_EMOJI_PROMPT;
         } else {
-          prompt = "请简洁描述这张图片的内容。";
+          prompt = VLM_IMAGE_PROMPT;
         }
       }
 
@@ -388,14 +414,22 @@ export async function processImage(
               description = content;
               console.log(`[QQ] 图片识别成功: ${providerName}/${modelName}`);
 
-              if (isEmoji && description) {
-                const emotionMatch = description.match(/情感[：:]\s*([^\n，,。]+)/);
-                if (emotionMatch) {
-                  emotionTags = emotionMatch[1]
-                    .split(/[,，、]/)
-                    .map((s) => s.trim())
-                    .filter(Boolean);
+              try {
+                const jsonMatch = content.match(/\{[\s\S]*\}/);
+                if (jsonMatch) {
+                  const parsed = JSON.parse(jsonMatch[0]);
+                  if (typeof parsed.isEmoji === "boolean") {
+                    type = parsed.isEmoji ? "emoji" : "image";
+                  }
+                  if (parsed.description && typeof parsed.description === "string") {
+                    description = parsed.description;
+                  }
+                  if (Array.isArray(parsed.emotions) && parsed.emotions.length > 0) {
+                    emotionTags = parsed.emotions.filter((e: any) => typeof e === "string" && e.length <= 15);
+                  }
                 }
+              } catch (parseError) {
+                console.log(`[QQ] VLM输出非JSON格式，使用原始文本`);
               }
               break;
             }
@@ -522,28 +556,29 @@ export async function initializeImageManager(): Promise<void> {
   await manager.initialize();
 }
 
-const EMOJI_CHECK_PROMPT = `判断这张图片是否适合保存为表情包。
+const EMOJI_CHECK_PROMPT = `判断这张图片是否适合保存为表情包，请严格按以下JSON格式输出，不要输出任何其他内容：
+{
+  "isEmoji": true或false,
+  "reason": "简短原因"
+}
 
-【表情包特征】
+【表情包特征 isEmoji=true】
 - 可爱、萌系的卡通形象
 - 表情包风格的图片（有情感表达）
 - 搞笑、吐槽类的图片
 - 动漫/二次元风格的表情图
 - 简洁的配图表情
 
-【不是表情包】
+【不是表情包 isEmoji=false】
 - 手机/电脑截图（有UI元素、界面）
 - 真人照片
 - 风景照
 - 文档/大量文字的图片
 - 新闻/资讯类图片
 - 复杂的海报/广告
-
-请只回复 JSON 格式：
-{
-  "isEmoji": true/false,
-  "reason": "简短原因"
-}`;
+- 聊天记录截图
+- APP界面截图
+- 代码截图`;
 
 function isLikelyEmojiBySize(base64Data: string): boolean {
   try {
@@ -592,16 +627,7 @@ export async function checkIfEmoji(
         return true;
       }
       
-      const desc = imageResult.description.toLowerCase();
-      const emojiKeywords = ['表情包', 'emoji', 'meme', 'q版', '动漫风格', '卡通', '萌', '可爱', '二次元', '插画', '特写'];
-      const hasEmojiKeyword = emojiKeywords.some(keyword => desc.includes(keyword));
-      
-      if (hasEmojiKeyword) {
-        console.log(`[QQ] 🎭 表情包检测: ✅ 描述包含表情包关键词`);
-        return true;
-      }
-      
-      console.log(`[QQ] 🎭 表情包检测: ❌ 描述不包含表情包关键词`);
+      console.log(`[QQ] 🎭 表情包检测: ❌ 图片识别结果类型非表情包`);
       return false;
     }
     
@@ -640,20 +666,12 @@ export async function checkIfEmoji(
         const jsonMatch = result.content.match(/\{[\s\S]*\}/);
         if (jsonMatch) {
           const parsed = JSON.parse(jsonMatch[0]);
-          const isEmoji = parsed.isEmoji === true;
-          console.log(`[QQ] 🎭 表情包检测: ${isEmoji ? '✅ 是表情包' : '❌ 不是表情包'} - ${parsed.reason || ''}`);
-          return isEmoji;
+          const isEmojiResult = parsed.isEmoji === true;
+          console.log(`[QQ] 🎭 表情包检测: ${isEmojiResult ? '✅ 是表情包' : '❌ 不是表情包'} - ${parsed.reason || ''}`);
+          return isEmojiResult;
         }
       } catch (parseError) {
-        const lowerDesc = result.content.toLowerCase();
-        if (lowerDesc.includes('"isemoji": true') || lowerDesc.includes('"isEmoji": true')) {
-          console.log(`[QQ] 🎭 表情包检测: ✅ 是表情包 (文本匹配)`);
-          return true;
-        }
-        if (lowerDesc.includes('表情包') || lowerDesc.includes('emoji') || lowerDesc.includes('meme')) {
-          console.log(`[QQ] 🎭 表情包检测: ✅ 是表情包 (关键词匹配)`);
-          return true;
-        }
+        console.log(`[QQ] 🎭 VLM输出非JSON格式，无法判定`);
       }
     } else {
       console.warn(`[QQ] ⚠️ VLM检测失败: ${result.error}，默认保存为表情包`);
