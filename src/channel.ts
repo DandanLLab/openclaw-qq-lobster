@@ -967,7 +967,6 @@ export const qqChannel: ChannelPlugin<ResolvedQQAccount> = {
                                                 
                                                 if (imageResult && imageResult.type !== "emoji") {
                                                   const desc = imageResult.description || "";
-                                                  const emojiIndicators = ["表情包", "emoji", "meme", "Q版", "萌系", "卡通形象", "动漫风格表情"];
                                                   let tags = imageResult.emotionTags;
                                                   if (!tags || tags.length === 0) {
                                                     const emotionMap: Record<string, string[]> = {

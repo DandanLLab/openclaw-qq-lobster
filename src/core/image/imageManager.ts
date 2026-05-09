@@ -342,6 +342,31 @@ function extractEmotionFromDescription(description: string): string[] {
   return emotions;
 }
 
+const EMOJI_POSITIVE_KEYWORDS = ["表情包", "emoji", "meme", "梗图"];
+const EMOJI_NEGATIVE_KEYWORDS = [
+  "截图", "截屏", "屏幕截图", "手机截图", "电脑截图",
+  "广告", "海报", "宣传", "推广", "促销", "打折", "优惠",
+  "聊天记录", "聊天界面", "对话截图",
+  "APP界面", "应用界面", "软件界面",
+  "代码", "编程", "源码",
+  "文档", "文件", "表格", "报表",
+  "新闻", "资讯", "报道",
+  "商品", "购物", "购买", "价格",
+  "真人照片", "风景照", "自拍照",
+];
+
+function isDescriptionEmoji(description: string): boolean {
+  const lower = description.toLowerCase();
+  
+  const hasNegative = EMOJI_NEGATIVE_KEYWORDS.some(kw => lower.includes(kw));
+  if (hasNegative) {
+    return false;
+  }
+
+  const hasPositive = EMOJI_POSITIVE_KEYWORDS.some(kw => lower.includes(kw));
+  return hasPositive;
+}
+
 export async function processImage(
   base64Data: string,
   runtime: any,
@@ -476,9 +501,7 @@ export async function processImage(
               }
 
               if (type !== "emoji") {
-                const emojiIndicators = ["表情包", "emoji", "meme", "Q版", "萌系", "卡通形象", "动漫风格表情"];
-                const lowerContent = content.toLowerCase();
-                if (emojiIndicators.some(kw => lowerContent.includes(kw))) {
+                if (isDescriptionEmoji(content)) {
                   type = "emoji";
                   console.log(`[QQ] 🎭 描述文本检测到表情包关键词，更新类型为emoji`);
                 }
@@ -553,9 +576,7 @@ export async function processImage(
 
       if (description) {
         if (type !== "emoji") {
-          const emojiIndicators = ["表情包", "emoji", "meme", "Q版", "萌系", "卡通形象", "动漫风格表情"];
-          const lowerDesc = description.toLowerCase();
-          if (emojiIndicators.some(kw => lowerDesc.includes(kw))) {
+          if (isDescriptionEmoji(description)) {
             type = "emoji";
             console.log(`[QQ] 🎭 描述文本检测到表情包关键词，更新类型为emoji`);
           }
@@ -697,8 +718,7 @@ export async function checkIfEmoji(
       }
       
       const desc = imageResult.description || "";
-      const emojiIndicators = ["表情包", "emoji", "meme", "Q版", "萌系", "卡通形象", "动漫风格表情"];
-      if (emojiIndicators.some(kw => desc.toLowerCase().includes(kw))) {
+      if (isDescriptionEmoji(desc)) {
         console.log(`[QQ] 🎭 表情包检测: ✅ 描述文本包含表情包关键词`);
         return true;
       }
